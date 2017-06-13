@@ -228,7 +228,8 @@ void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
-  uint8_t x, y,z = 0;
+  uint8_t x,z = 0;
+  uint32_t y = 0;
   for (;;)
   {
     int16_t analogInputValue;
@@ -239,15 +240,23 @@ void AnalogLoopbackThread(void* pData)
     // Put analog sample
     Analog_Put(analogData->channelNb, analogInputValue);
 
-
-    // Test data
     if (analogData->channelNb == 0)
-      x = analogInputValue;
-    else if (analogData->channelNb == 1)
-      y = analogInputValue;
-    else if (analogData->channelNb == 2)
-          z = analogInputValue;
-    Packet_Put(0x10, x, y, z);
+    {
+    	y = ((analogInputValue*100)/35)*1000;
+    	if (y < 1030)
+    		x = 254;
+    	else if (y > 1030)
+    		x = 0;
+	    Packet_Put(0x10, analogInputValue, x, 0);
+    }
+//    // Test data
+//    if (analogData->channelNb == 0)
+//      x = analogInputValue;
+//    else if (analogData->channelNb == 1)
+//      y = analogInputValue;
+//    else if (analogData->channelNb == 2)
+//          z = analogInputValue;
+//    Packet_Put(0x10, x, y, z);
   }
 }
 
