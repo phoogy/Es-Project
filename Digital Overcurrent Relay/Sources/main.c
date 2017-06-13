@@ -35,22 +35,32 @@
 // Analog functions
 #include "analog.h"
 
+// Packet functions
+#include "packet.h"
+
+// ----------------------------------------
+// Packet set up
+// ----------------------------------------
+#define BAUD_RATE (uint32_t)115200  // BaudRate
+
+TPacket Packet;
 // ----------------------------------------
 // Thread set up
 // ----------------------------------------
 // Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
 #define THREAD_STACK_SIZE 100
-#define NB_ANALOG_CHANNELS 2
+#define NB_ANALOG_CHANNELS 3
 
 // Thread stacks
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the LED Init thread. */
+OS_THREAD_STACK(PacketModuleThreadStack, THREAD_STACK_SIZE);
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 // ----------------------------------------
 // Thread priorities
 // 0 = highest priority
 // ----------------------------------------
-const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {1, 2};
+const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {2, 3, 4};
 
 /*! @brief Data structure used to pass Analog configuration to a user thread
  *
@@ -73,8 +83,63 @@ static TAnalogThreadData AnalogThreadData[NB_ANALOG_CHANNELS] =
   {
     .semaphore = NULL,
     .channelNb = 1
+  },
+  {
+    .semaphore = NULL,
+    .channelNb = 2
   }
 };
+
+/*
+ * @brief Sends an ACK or NAK Response based on @param ackFlag.
+ * @param bool ackFlag The flag in which to send a ACK or NAK
+ * @return void.
+ */
+static void ACKNAK(bool ackFlag)
+{
+  if (ackFlag)
+    Packet_Put(Packet_Command |= 0x80, Packet_Parameter1, Packet_Parameter2, Packet_Parameter3);
+  else
+    Packet_Put(Packet_Command &= ~0x80, Packet_Parameter1, Packet_Parameter2, Packet_Parameter3);
+}
+
+/*
+ * @brief Determines the packet's instructions and calls the relevant function.
+ * @return void.
+ */
+static void HandlePacket(void)
+{
+  bool ackFlag = false;
+//  switch (Packet_Command & 0x7F)
+//  {
+//    case CMD_TOWER_STARTUP:
+//      ackFlag = TowerStartup();
+//      break;
+//    case CMD_TOWER_VERSION:
+//      ackFlag = TowerVersion();
+//      break;
+//    case CMD_TOWER_NUMBER:
+//      ackFlag = TowerNumber();
+//      break;
+//    case CMD_TOWER_MODE:
+//      ackFlag = TowerMode();
+//      break;
+//    case CMD_READ_BYTE:
+//      ackFlag = ReadByte();
+//      break;
+//    case CMD_PROGRAM_BYTE:
+//      ackFlag = ProgramByte();
+//      break;
+//    case CMD_TIME:
+//      ackFlag = SetTime();
+//      break;
+//    case CMD_PROTOCOL_MODE:
+//      ackFlag = ProtocolMode();
+//      break;
+//  }
+  if ((Packet_Command & 0x80) == 0x80)
+    ACKNAK(ackFlag);
+}
 
 void LPTMRInit(const uint16_t count)
 {
@@ -128,6 +193,8 @@ void __attribute__ ((interrupt)) LPTimer_ISR(void)
  */
 static void InitModulesThread(void* pData)
 {
+  (void)Packet_Init(BAUD_RATE, CPU_BUS_CLK_HZ);
+
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
 
@@ -142,6 +209,18 @@ static void InitModulesThread(void* pData)
   OS_ThreadDelete(OS_PRIORITY_SELF);
 }
 
+/*! @brief Gets and handles packets.
+ *
+ */
+static void PacketModuleThread(void* pData)
+{
+  for (;;)
+  {
+    if (Packet_Get())
+      HandlePacket();
+  }
+}
+
 /*! @brief Samples a value on an ADC channel and sends it to the corresponding DAC channel.
  *
  */
@@ -149,7 +228,7 @@ void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
-
+  uint8_t x, y,z = 0;
   for (;;)
   {
     int16_t analogInputValue;
@@ -159,6 +238,16 @@ void AnalogLoopbackThread(void* pData)
     Analog_Get(analogData->channelNb, &analogInputValue);
     // Put analog sample
     Analog_Put(analogData->channelNb, analogInputValue);
+
+
+    // Test data
+    if (analogData->channelNb == 0)
+      x = analogInputValue;
+    else if (analogData->channelNb == 1)
+      y = analogInputValue;
+    else if (analogData->channelNb == 2)
+          z = analogInputValue;
+    Packet_Put(0x10, x, y, z);
   }
 }
 
@@ -180,7 +269,12 @@ int main(void)
                           &InitModulesThreadStack[THREAD_STACK_SIZE - 1],
                           0); // Highest priority
 
-  // Create threads for 2 analog loopback channels
+  error = OS_ThreadCreate(PacketModuleThread,
+                            NULL,
+                            &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
+                            1); // Highest priority
+
+  // Create threads for 3 analog loopback channels
   for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
   {
     error = OS_ThreadCreate(AnalogLoopbackThread,
