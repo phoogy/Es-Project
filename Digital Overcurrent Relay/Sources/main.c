@@ -38,12 +38,14 @@
 // Packet functions
 #include "packet.h"
 
+
+#define VOLTAGE(x) ((x-32768)/32768)*10
+static uint8_t x,y,z;
 // ----------------------------------------
 // Packet set up
 // ----------------------------------------
 #define BAUD_RATE (uint32_t)115200  // BaudRate
 
-TPacket Packet;
 // ----------------------------------------
 // Thread set up
 // ----------------------------------------
@@ -52,15 +54,16 @@ TPacket Packet;
 #define NB_ANALOG_CHANNELS 3
 
 // Thread stacks
-OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the LED Init thread. */
+OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 OS_THREAD_STACK(PacketModuleThreadStack, THREAD_STACK_SIZE);
+OS_THREAD_STACK(TestModuleThreadStack, THREAD_STACK_SIZE);
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 // ----------------------------------------
 // Thread priorities
 // 0 = highest priority
 // ----------------------------------------
-const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {2, 3, 4};
+const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {3, 4, 5};
 
 /*! @brief Data structure used to pass Analog configuration to a user thread
  *
@@ -90,6 +93,9 @@ static TAnalogThreadData AnalogThreadData[NB_ANALOG_CHANNELS] =
   }
 };
 
+static OS_ECB* SemX;
+static OS_ECB* SemY;
+static OS_ECB* SemZ;
 /*
  * @brief Sends an ACK or NAK Response based on @param ackFlag.
  * @param bool ackFlag The flag in which to send a ACK or NAK
@@ -194,6 +200,9 @@ void __attribute__ ((interrupt)) LPTimer_ISR(void)
 static void InitModulesThread(void* pData)
 {
   (void)Packet_Init(BAUD_RATE, CPU_BUS_CLK_HZ);
+  SemX = OS_SemaphoreCreate(0);
+  SemY = OS_SemaphoreCreate(0);
+  SemZ = OS_SemaphoreCreate(0);
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
@@ -201,6 +210,7 @@ static void InitModulesThread(void* pData)
   // Generate the global analog semaphores
   for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
     AnalogThreadData[analogNb].semaphore = OS_SemaphoreCreate(0);
+
 
   // Initialise the low power timer to tick every 10 ms
   LPTMRInit(10);
@@ -221,6 +231,21 @@ static void PacketModuleThread(void* pData)
   }
 }
 
+/*! @brief Test thread.
+ *
+ */
+static void TestModuleThread(void* pData)
+{
+  for (;;)
+  {
+    (void)OS_SemaphoreWait(SemX,0);
+    (void)OS_SemaphoreWait(SemY,0);
+    (void)OS_SemaphoreWait(SemZ,0);
+    Packet_Put(0x10, x, y, z);
+  }
+}
+
+
 /*! @brief Samples a value on an ADC channel and sends it to the corresponding DAC channel.
  *
  */
@@ -228,7 +253,7 @@ void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
-  uint8_t x, y,z = 0;
+
   for (;;)
   {
     int16_t analogInputValue;
@@ -241,13 +266,23 @@ void AnalogLoopbackThread(void* pData)
 
 
     // Test data
-    if (analogData->channelNb == 0)
-      x = analogInputValue;
-    else if (analogData->channelNb == 1)
-      y = analogInputValue;
-    else if (analogData->channelNb == 2)
-          z = analogInputValue;
-    Packet_Put(0x10, x, y, z);
+    switch(analogData->channelNb)
+    {
+      case 0:
+        x = analogInputValue;
+        (void)OS_SemaphoreSignal(SemX);
+        break;
+      case 1:
+        y = analogInputValue;
+        (void)OS_SemaphoreSignal(SemY);
+        break;
+      case 2:
+        z = analogInputValue;
+        (void)OS_SemaphoreSignal(SemZ);
+        break;
+      default:
+        break;
+    }
   }
 }
 
@@ -270,9 +305,14 @@ int main(void)
                           0); // Highest priority
 
   error = OS_ThreadCreate(PacketModuleThread,
-                            NULL,
-                            &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
-                            1); // Highest priority
+                          NULL,
+                          &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
+                          1); // Second priority
+
+  error = OS_ThreadCreate(TestModuleThread,
+                          NULL,
+                          &TestModuleThreadStack[THREAD_STACK_SIZE - 1],
+                          1); // Third priority
 
   // Create threads for 3 analog loopback channels
   for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
