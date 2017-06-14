@@ -43,7 +43,7 @@ bool PIT_Init(const uint32_t moduleClk, void (*userFunction)(void*), void* userA
 
 void PIT_Set(const uint32_t period, const bool restart)
 {
-  PIT_LDVAL0 = (period * 1000000 / ClockPeriod) - 1;	// Calculate number of cycles and set LDVAL
+  PIT_LDVAL0 = (period * 1000 / ClockPeriod) - 1;	// Calculate number of cycles and set LDVAL
   if (restart)
   {
     PIT_Enable(false);				// Disable the PIT Timer
