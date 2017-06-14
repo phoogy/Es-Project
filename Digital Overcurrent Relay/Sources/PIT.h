@@ -48,4 +48,6 @@ void PIT_Enable(const bool enable);
  */
 void __attribute__ ((interrupt)) PIT_ISR(void);
 
+extern OS_ECB* PITReady;
+
 #endif
