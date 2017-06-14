@@ -39,7 +39,9 @@
 #include "packet.h"
 
 
-#define VOLTAGE(x) ((x-32768)/32768)*10
+#define AC_TO_DC(x) (double)((x-32768)/32768)*10
+#define DC_TO_AC(x) (uint16_t)((32768*x)/10)+32768
+
 static uint8_t x,y,z;
 // ----------------------------------------
 // Packet set up
@@ -94,8 +96,8 @@ static TAnalogThreadData AnalogThreadData[NB_ANALOG_CHANNELS] =
 };
 
 static OS_ECB* SemX;
-static OS_ECB* SemY;
-static OS_ECB* SemZ;
+//static OS_ECB* SemY;
+//static OS_ECB* SemZ;
 /*
  * @brief Sends an ACK or NAK Response based on @param ackFlag.
  * @param bool ackFlag The flag in which to send a ACK or NAK
@@ -201,8 +203,8 @@ static void InitModulesThread(void* pData)
 {
   (void)Packet_Init(BAUD_RATE, CPU_BUS_CLK_HZ);
   SemX = OS_SemaphoreCreate(0);
-  SemY = OS_SemaphoreCreate(0);
-  SemZ = OS_SemaphoreCreate(0);
+//  SemY = OS_SemaphoreCreate(0);
+//  SemZ = OS_SemaphoreCreate(0);
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
@@ -211,6 +213,11 @@ static void InitModulesThread(void* pData)
   for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
     AnalogThreadData[analogNb].semaphore = OS_SemaphoreCreate(0);
 
+
+  // 16 samples per cycle at 50Hz
+  // 16 * 50 = 800 samples per 1000ms
+  // 1000 / 800 = 1.25
+  // We need to tick every 1.25 ms?
 
   // Initialise the low power timer to tick every 10 ms
   LPTMRInit(10);
@@ -239,8 +246,8 @@ static void TestModuleThread(void* pData)
   for (;;)
   {
     (void)OS_SemaphoreWait(SemX,0);
-    (void)OS_SemaphoreWait(SemY,0);
-    (void)OS_SemaphoreWait(SemZ,0);
+//    (void)OS_SemaphoreWait(SemY,0);
+//    (void)OS_SemaphoreWait(SemZ,0);
     Packet_Put(0x10, x, y, z);
   }
 }
@@ -269,17 +276,23 @@ void AnalogLoopbackThread(void* pData)
     switch(analogData->channelNb)
     {
       case 0:
-        x = analogInputValue;
+        if (AC_TO_DC(analogInputValue) < 1.03)
+          x = 0;
+        else if (AC_TO_DC(analogInputValue) > 1.03)
+          x = 254;
+        x = (uint8_t)analogInputValue;
+        y = (uint8_t)(AC_TO_DC(analogInputValue));
+        z = (uint8_t)((AC_TODC(analogInputValue)/10)*254);
         (void)OS_SemaphoreSignal(SemX);
         break;
-      case 1:
-        y = analogInputValue;
-        (void)OS_SemaphoreSignal(SemY);
-        break;
-      case 2:
-        z = analogInputValue;
-        (void)OS_SemaphoreSignal(SemZ);
-        break;
+//      case 1:
+//        y = analogInputValue;
+//        (void)OS_SemaphoreSignal(SemY);
+//        break;
+//      case 2:
+//        z = analogInputValue;
+//        (void)OS_SemaphoreSignal(SemZ);
+//        break;
       default:
         break;
     }
