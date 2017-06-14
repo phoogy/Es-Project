@@ -38,6 +38,9 @@
 // Packet functions
 #include "packet.h"
 
+// PIT functions
+#include "PIT.h"
+
 
 #define AC_TO_DC(x) (double)((x-32768)/32768)*10
 #define DC_TO_AC(x) (uint16_t)((32768*x)/10)+32768
@@ -59,13 +62,14 @@ static uint8_t x,y,z;
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 OS_THREAD_STACK(PacketModuleThreadStack, THREAD_STACK_SIZE);
 OS_THREAD_STACK(TestModuleThreadStack, THREAD_STACK_SIZE);
+OS_THREAD_STACK(PitModuleThreadStack, THREAD_STACK_SIZE);
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 // ----------------------------------------
 // Thread priorities
 // 0 = highest priority
 // ----------------------------------------
-const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {3, 4, 5};
+const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {4, 5, 6};
 
 /*! @brief Data structure used to pass Analog configuration to a user thread
  *
@@ -149,49 +153,12 @@ static void HandlePacket(void)
     ACKNAK(ackFlag);
 }
 
-void LPTMRInit(const uint16_t count)
+/*! @brief PIT signals other threads to run.
+ *
+ */
+static void PitModuleThread(void* pData)
 {
-  // Enable clock gate to LPTMR module
-  SIM_SCGC5 |= SIM_SCGC5_LPTIMER_MASK;
-
-  // Disable the LPTMR while we set up
-  // This also clears the CSR[TCF] bit which indicates a pending interrupt
-  LPTMR0_CSR &= ~LPTMR_CSR_TEN_MASK;
-
-  // Enable LPTMR interrupts
-  LPTMR0_CSR |= LPTMR_CSR_TIE_MASK;
-  // Reset the LPTMR free running counter whenever the 'counter' equals 'compare'
-  LPTMR0_CSR &= ~LPTMR_CSR_TFC_MASK;
-  // Set the LPTMR as a timer rather than a counter
-  LPTMR0_CSR &= ~LPTMR_CSR_TMS_MASK;
-
-  // Bypass the prescaler
-  LPTMR0_PSR |= LPTMR_PSR_PBYP_MASK;
-  // Select the prescaler clock source
-  LPTMR0_PSR = (LPTMR0_PSR & ~LPTMR_PSR_PCS(0x3)) | LPTMR_PSR_PCS(1);
-
-  // Set compare value
-  LPTMR0_CMR = LPTMR_CMR_COMPARE(count);
-
-  // Initialize NVIC
-  // see p. 91 of K70P256M150SF3RM.pdf
-  // Vector 0x65=101, IRQ=85
-  // NVIC non-IPR=2 IPR=21
-  // Clear any pending interrupts on LPTMR
-  NVICICPR2 = NVIC_ICPR_CLRPEND(1 << 21);
-  // Enable interrupts from LPTMR module
-  NVICISER2 = NVIC_ISER_SETENA(1 << 21);
-
-  //Turn on LPTMR and start counting
-  LPTMR0_CSR |= LPTMR_CSR_TEN_MASK;
-}
-
-void __attribute__ ((interrupt)) LPTimer_ISR(void)
-{
-  // Clear interrupt flag
-  LPTMR0_CSR |= LPTMR_CSR_TCF_MASK;
-
-  // Signal the analog channels to take a sample
+  OS_SemaphoreWait(PITReady,0);
   for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
     (void)OS_SemaphoreSignal(AnalogThreadData[analogNb].semaphore);
 }
@@ -213,14 +180,14 @@ static void InitModulesThread(void* pData)
   for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
     AnalogThreadData[analogNb].semaphore = OS_SemaphoreCreate(0);
 
-
   // 16 samples per cycle at 50Hz
   // 16 * 50 = 800 samples per 1000ms
   // 1000 / 800 = 1.25
-  // We need to tick every 1.25 ms?
+  // We need to tick every 1.25 ms = 1250 ns
 
-  // Initialise the low power timer to tick every 10 ms
-  LPTMRInit(10);
+  // Initialise the PIT to tick every 1250 ns
+  PIT_Init(CPU_BUS_CLK_HZ, NULL, NULL);
+  PIT_Set(1250,true);
 
   // We only do this once - therefore delete this thread
   OS_ThreadDelete(OS_PRIORITY_SELF);
@@ -282,7 +249,7 @@ void AnalogLoopbackThread(void* pData)
           x = 254;
         x = (uint8_t)analogInputValue;
         y = (uint8_t)(AC_TO_DC(analogInputValue));
-        z = (uint8_t)((AC_TODC(analogInputValue)/10)*254);
+        z = (uint8_t)((AC_TO_DC(analogInputValue)/10)*254);
         (void)OS_SemaphoreSignal(SemX);
         break;
 //      case 1:
@@ -325,7 +292,11 @@ int main(void)
   error = OS_ThreadCreate(TestModuleThread,
                           NULL,
                           &TestModuleThreadStack[THREAD_STACK_SIZE - 1],
-                          1); // Third priority
+                          2); // Third priority
+  error = OS_ThreadCreate(PitModuleThread,
+                          NULL,
+                          &PitModuleThreadStack[THREAD_STACK_SIZE - 1],
+                          3); // Third priority
 
   // Create threads for 3 analog loopback channels
   for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
