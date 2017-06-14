@@ -57,6 +57,7 @@
 #include "Cpu.h"
 #include "OS.h"
 #include "UART.h"
+#include "PIT.h"
 
 void __attribute__ ((interrupt)) LPTimer_ISR(void);
 
