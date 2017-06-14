@@ -13,6 +13,7 @@
 
 // new types
 #include "types.h"
+#include "OS.h"
 
 /*! @brief Sets up the PIT before first use.
  *
