@@ -211,15 +211,15 @@ void AnalogLoopbackThread(void* pData)
     // Put analog sample
     Analog_Put(analogData->channelNb, analogInputValue);
 
-    if (analogData->channelNb == 0)
-    {
-    	y = ((analogInputValue*100)/35)*1000;
-    	if (y < 1030)
-    		x = 254;
-    	else if (y > 1030)
-    		x = 0;
-	    Packet_Put(0x10, analogInputValue, x, 0);
-    }
+//    if (analogData->channelNb == 0)
+//    {
+//    	y = ((analogInputValue*100)/35)*1000;
+//    	if (y < 1030)
+//    		x = 254;
+//    	else if (y > 1030)
+//    		x = 0;
+//	    Packet_Put(0x10, analogInputValue, x, 0);
+//    }
 //    // Test data
 //    if (analogData->channelNb == 0)
 //      x = analogInputValue;
@@ -257,7 +257,7 @@ int main(void)
   error = OS_ThreadCreate(PitModuleThread,
                           NULL,
                           &PitModuleThreadStack[THREAD_STACK_SIZE - 1],
-                          3); // Third priority
+                          2); // Third priority
   // Create threads for 3 analog loopback channels
   for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
   {
