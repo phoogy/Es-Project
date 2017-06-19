@@ -41,11 +41,16 @@
 // PIT functions
 #include "PIT.h"
 
+// Non-volatile Memory
+#include "Flash.h"
+
 
 #define AC_TO_DC(x) (double)((x-32768)/32768)*10
 #define DC_TO_AC(x) (uint16_t)((32768*x)/10)+32768
 
+// Test parameters
 static uint8_t x,y,z;
+
 // ----------------------------------------
 // Packet set up
 // ----------------------------------------
@@ -168,10 +173,13 @@ static void PitModuleThread(void* pData)
  */
 static void InitModulesThread(void* pData)
 {
+  // Flash
+  (void)Flash_Init();
+
+
+  // Packet
   (void)Packet_Init(BAUD_RATE, CPU_BUS_CLK_HZ);
   SemX = OS_SemaphoreCreate(0);
-//  SemY = OS_SemaphoreCreate(0);
-//  SemZ = OS_SemaphoreCreate(0);
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
@@ -201,7 +209,43 @@ static void PacketModuleThread(void* pData)
   for (;;)
   {
     if (Packet_Get())
-      HandlePacket();
+    {
+      bool ackFlag = false;
+        switch (Packet_Command & 0x7F)
+        {
+//          case CMD_TOWER_STARTUP:
+//            ackFlag = TowerStartup();
+//            break;
+//          case CMD_TOWER_VERSION:
+//            ackFlag = TowerVersion();
+//            break;
+//          case CMD_TOWER_NUMBER:
+//            ackFlag = TowerNumber();
+//            break;
+//          case CMD_TOWER_MODE:
+//            ackFlag = TowerMode();
+//            break;
+//          case CMD_READ_BYTE:
+//            ackFlag = ReadByte();
+//            break;
+//          case CMD_PROGRAM_BYTE:
+//            ackFlag = ProgramByte();
+//            break;
+//          case CMD_TIME:
+//            ackFlag = SetTime();
+//            break;
+//          case CMD_PROTOCOL_MODE:
+//            ackFlag = ProtocolMode();
+//            break;
+          case 0x09:    // Get values
+          {
+            //if (Packet_Put)
+          }
+        }
+        if ((Packet_Command & 0x80) == 0x80)
+          ACKNAK(ackFlag);
+    }
+      //HandlePacket();
   }
 }
 
@@ -227,17 +271,35 @@ void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
-
+  TAnalogInput channel[NB_ANALOG_CHANNELS];
+  uint8_t valueArrayPos[NB_ANALOG_CHANNELS];
+  for (uint8_t i = 0; i < NB_ANALOG_CHANNELS; i++)
+  {
+    valueArrayPos[i] = 0;
+    channel[i].putPtr = valueArrayPos[i];
+  }
   for (;;)
   {
     int16_t analogInputValue;
 
+
+
     (void)OS_SemaphoreWait(analogData->semaphore, 0);
+
     // Get analog sample
     Analog_Get(analogData->channelNb, &analogInputValue);
     // Put analog sample
     Analog_Put(analogData->channelNb, analogInputValue);
 
+
+    channel[analogData->channelNb].oldValue = channel[analogData->channelNb].value;
+    channel[analogData->channelNb].value = analogInputValue;
+    channel
+
+    // TODO
+    // Analog_Put replaced with
+    // for outputChannel1 and outputChannel2
+    // timing and
 
     // Test data
     switch(analogData->channelNb)
