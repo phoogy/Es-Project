@@ -59,7 +59,7 @@
 #include "UART.h"
 #include "PIT.h"
 
-void __attribute__ ((interrupt)) LPTimer_ISR(void);
+//void __attribute__ ((interrupt)) LPTimer_ISR(void);
 
   /* ISR prototype */
   extern uint32_t __SP_INIT;

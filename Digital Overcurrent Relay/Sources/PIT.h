@@ -13,7 +13,6 @@
 
 // new types
 #include "types.h"
-#include "OS.h"
 
 /*! @brief Sets up the PIT before first use.
  *
@@ -48,7 +47,5 @@ void PIT_Enable(const bool enable);
  *  @note Assumes the PIT has been initialized.
  */
 void __attribute__ ((interrupt)) PIT_ISR(void);
-
-extern OS_ECB* PITReady;
 
 #endif

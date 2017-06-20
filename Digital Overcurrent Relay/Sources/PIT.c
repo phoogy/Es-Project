@@ -13,16 +13,14 @@
 #include "PIT.h"
 #include "MK70F12.h"
 #include "OS.h"
+#include "Semaphore.h"
 
 static uint32_t ClockPeriod;
 static void (*CallbackFunction)(void *);
 static void *CallbackArguments;
-OS_ECB* PITReady;
 
 bool PIT_Init(const uint32_t moduleClk, void (*userFunction)(void*), void* userArguments)
 {
-  PITReady = OS_SemaphoreCreate(0);
-
   SIM_SCGC6 |= SIM_SCGC6_PIT_MASK;		// Enable PIT clock gating
 
   CallbackFunction  = userFunction;		// Storing userFunction
@@ -43,7 +41,7 @@ bool PIT_Init(const uint32_t moduleClk, void (*userFunction)(void*), void* userA
 
 void PIT_Set(const uint32_t period, const bool restart)
 {
-  PIT_LDVAL0 = (period * 1000 / ClockPeriod) - 1;	// Calculate number of cycles and set LDVAL
+  PIT_LDVAL0 = (period / ClockPeriod) - 1;	// Calculate number of cycles and set LDVAL
   if (restart)
   {
     PIT_Enable(false);				// Disable the PIT Timer
