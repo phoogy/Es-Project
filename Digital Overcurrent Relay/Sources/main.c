@@ -27,6 +27,7 @@
 /* MODULE main */
 
 // CPU module - contains low level hardware initialization routines
+#include <math.h>
 #include "Cpu.h"
 #include "OS.h"
 #include "Events.h"
@@ -46,13 +47,16 @@
 #include "Semaphore.h"
 #include "analog.h"
 
-
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
 #define NB_ANALOG_CHANNELS 1
 #define BAUD_RATE (uint32_t)115200	// BaudRate
 #define DEFAULT_TOWER_NUMBER 6681	// Last four digits of student number to be used as tower number
 #define SAMPLING_CLOCK 0
 #define TIMING_CLOCK 1
+#define TIMING_CHANNEL 0
+#define TRIP_CHANNEL 1
+#define DOR_IDLE (int16_t)0
+#define DOR_ACTIVE (int16_t)16383
 
 
 #define CMD_TOWER_STARTUP 0x04		//Tower Startup command in hex
@@ -94,6 +98,50 @@ typedef struct AnalogThreadData
   uint8_t channelNb;
 } TAnalogThreadData;
 
+
+
+typedef enum
+{
+  INVERSE = 0,
+  VERY_INVERSE = 1,
+  EXTREMELY_INVERSE = 2
+} TInverseMode;
+
+
+/*! @brief Data structure used to calculate the timing used for tripping
+ *
+ */
+typedef struct Characteristic
+{
+  TInverseMode mode;
+  double k;
+  double a;
+} TCharacteristic;
+
+/*! @brief Characteristic data
+ *
+ */
+static TCharacteristic Characteristic[3] =
+{
+  {
+	.mode = INVERSE,
+	.k = 0.14,
+	.a = 0.02
+  },
+  {
+	.mode = VERY_INVERSE,
+	.k = 13.5,
+	.a = 1
+  },
+  {
+	.mode = EXTREMELY_INVERSE,
+	.k = 80,
+	.a = 2
+  }
+};
+
+
+
 /*! @brief Analog thread configuration data
  *
  */
@@ -118,18 +166,14 @@ static TAnalogThreadData AnalogThreadData[3] =
 /* Declared variables */
 static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. */
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
-bool DataReady;
+static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Tower Mode. */
 
-bool Tripped = false;
+//bool DataReady;
+
 bool TimingStarted = false;
 bool TimingActive = false;
 
-
 /* Semaphores */
-OS_ECB* PacketReady;
-//OS_ECB* PITReady;
-OS_ECB* ByteReady;
-
 
 /*
  * @brief Sends or Sets the Tower Number.
@@ -276,16 +320,6 @@ static void HandlePacket(void)
 
 
 
-
-
-
-
-
-
-
-
-
-
 /*! @brief Initialises the modules.
  *
  *  @param pData is not used but is required by the OS to create a thread.
@@ -298,10 +332,10 @@ static void InitModulesThread(void* pData)
   /* Local variable definitions */
   bool initialised = true;
   //AccelMode = ACCEL_POLL;
-  DataReady = true;
+  //DataReady = true;
 
   /* Create Semaphores */
-  PacketReady = OS_SemaphoreCreate(0);
+  //PacketReady = OS_SemaphoreCreate(0);
   //RTCReady = OS_SemaphoreCreate(0);
   //PITReady = OS_SemaphoreCreate(0);
   //FTMReady = OS_SemaphoreCreate(0);
@@ -335,18 +369,21 @@ static void InitModulesThread(void* pData)
     initialised &= Flash_Write16((uint16_t *)NvTowerMode, (uint16_t)1);
   }
 
+  /* Allocate Flash Memory for Inverse Mode */
+  initialised &= Flash_AllocateVar((volatile void**)&NvInverseMode, sizeof(*NvInverseMode));	// Allocate Flash space for Tower mode
+
+  /* If no valid Inverse mode is set then set to default INVERSE*/
+  if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE || *NvInverseMode != EXTREMELY_INVERSE)
+	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
 
   PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 500ms
-  PIT_Set(TIMING_CLOCK, 2000000, false);
-  //FTM_Set(&FTMChannel0);		// Set FTM
 
 
-
+  //PIT_Set(TIMING_CLOCK, 2000000, false);
 
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
-
 
 
 
@@ -377,7 +414,6 @@ static void TimingModuleThread(void* pData)
   {
     OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
     PIT_Enable(TIMING_CLOCK, false);
-    Tripped = true;
   }
 }
 
@@ -386,10 +422,7 @@ static void TripModuleThread(void* pData)
   for (;;)
   {
     OS_SemaphoreWait(PITReady[SAMPLING_CLOCK], 0);
-    if (Tripped)
-      Analog_Put(1, (int16_t)16383);
-    else
-      Analog_Put(0, (int16_t)16383);
+    Analog_Put(1, DOR_ACTIVE);
   }
 }
 
@@ -399,38 +432,33 @@ void AnalogLoopbackThread(void* pData)
   #define analogData ((TAnalogThreadData*)pData)
   int16_t analogInputValue[16];
   uint8_t sampleCount = 0;
-  bool timingStart = false;
-  bool timingTripped = false;
 
   uint8_t cycles = 0;
   bool timingActive = false;
   for (;;)
   {
-    //int16_t analogInputValue;
-
     (void)OS_SemaphoreWait(analogData->semaphore, 0);
     // Get analog sample
     Analog_Get(analogData->channelNb, &analogInputValue[sampleCount]);
     // Put analog sample
-    Analog_Put(0, analogInputValue[sampleCount]);
+    //Analog_Put(0, analogInputValue[sampleCount]);
 
     sampleCount++;
-
 
     if (sampleCount == sizeof(analogInputValue))
     {
       // vrms calculation
-    	int32_t sum = 0;
-    	double average = 0;
+      int32_t sum = 0;
+      double average = 0;
       double vrms = 0;
 
-    	for (int i = 0; i < sizeof(analogInputValue); i++)
-    	{
-    		sum = sum + (analogInputValue[i] * analogInputValue[i]);
-    	}
-    	average = (double)(sum/sizeof(analogInputValue));
+	  for (int i = 0; i < sizeof(analogInputValue); i++)
+	  {
+		sum = sum + (analogInputValue[i] * analogInputValue[i]);
+	  }
+	  average = (double)(sum/sizeof(analogInputValue));
 
-    	vrms = average/3;
+	  vrms = average/3;
 
       if (average > 0)
       {
@@ -443,22 +471,31 @@ void AnalogLoopbackThread(void* pData)
 
       double irms = vrms/0.35;
 
-
       if (irms < 1.03)
       {
+    	Analog_Put(TIMING_CHANNEL, DOR_IDLE);
+    	Analog_Put(TRIP_CHANNEL, DOR_IDLE);
         TimingActive = false;
-        Tripped = false;
       }else
       {
         if (!TimingActive)
         {
+
+          //uint32_t period = (Characteristic[NvInverseMode].k) / (pow(irms, Characteristic[NvInverseMode].a)-1);
+        	uint32_t period = (Characteristic[(int)NvInverseMode].k) / (pow(irms, Characteristic[(int)NvInverseMode].a)-1);
+          //PIT_Set(TIMING_CLOCK,)
           PIT_Enable(TIMING_CLOCK, false);
           PIT_Enable(TIMING_CLOCK, true);
+        } else
+        {
+
         }
+
+        Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
         TimingActive = true;
       }
 
-    	sampleCount = 0;
+      sampleCount = 0;
     }
   }
 }
