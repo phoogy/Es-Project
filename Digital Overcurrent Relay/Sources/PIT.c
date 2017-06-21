@@ -34,7 +34,7 @@ bool PIT_Init(const uint32_t moduleClk)
   NVICICPR2 = (1 << 4); 			// Clear pending interrupts on PIT module
   NVICISER2 = (1 << 4); 			// Enable interrupts from Pit module
 
-  for (int i=0; i < sizeof(PITReady); i++)
+  for (int i=0; i < 4; i++)
     PITReady[i] = OS_SemaphoreCreate(0);
 
   return true;

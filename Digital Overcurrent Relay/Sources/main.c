@@ -75,7 +75,7 @@ static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((align
 //static uint32_t RTCModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t FTMModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t PITModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
+//static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t TripModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t AccelPollModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t AccelIntModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
@@ -373,10 +373,12 @@ static void InitModulesThread(void* pData)
   initialised &= Flash_AllocateVar((volatile void**)&NvInverseMode, sizeof(*NvInverseMode));	// Allocate Flash space for Tower mode
 
   /* If no valid Inverse mode is set then set to default INVERSE*/
-  if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE || *NvInverseMode != EXTREMELY_INVERSE)
-	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
+  uint8_t testVar = *NvInverseMode;
 
-  PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 500ms
+  if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE ||* NvInverseMode != EXTREMELY_INVERSE)
+	initialised &= Flash_Write8((uint8_t *)&NvInverseMode, INVERSE);
+
+  PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
 
 
   //PIT_Set(TIMING_CLOCK, 2000000, false);
@@ -408,21 +410,26 @@ static void PacketModuleThread(void* pData)
 }
 
 
-static void TimingModuleThread(void* pData)
-{
-  for (;;)
-  {
-    OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-    PIT_Enable(TIMING_CLOCK, false);
-  }
-}
+//static void TimingModuleThread(void* pData)
+//{
+//  for (;;)
+//  {
+//    OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
+
+
+//    PIT_Enable(TIMING_CLOCK, false);
+
+
+//  }
+//}
 
 static void TripModuleThread(void* pData)
 {
   for (;;)
   {
-    OS_SemaphoreWait(PITReady[SAMPLING_CLOCK], 0);
-    Analog_Put(1, DOR_ACTIVE);
+    OS_SemaphoreWait(PITReady[TRIP_CHANNEL], 0);
+    PIT_Enable(TIMING_CLOCK, false);
+    Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
   }
 }
 
@@ -430,7 +437,8 @@ void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
-  int16_t analogInputValue[16];
+  static const uint8_t nbSamples = 16;
+  int16_t analogInputValue[nbSamples];
   uint8_t sampleCount = 0;
 
   uint8_t cycles = 0;
@@ -445,33 +453,25 @@ void AnalogLoopbackThread(void* pData)
 
     sampleCount++;
 
-    if (sampleCount == sizeof(analogInputValue))
+    if (sampleCount == nbSamples)
     {
       // vrms calculation
       int32_t sum = 0;
       double average = 0;
       double vrms = 0;
 
-	  for (int i = 0; i < sizeof(analogInputValue); i++)
+	  for (int i = 0; i < nbSamples; i++)
 	  {
 		sum = sum + (analogInputValue[i] * analogInputValue[i]);
 	  }
-	  average = (double)(sum/sizeof(analogInputValue));
+	  average = (sum/nbSamples);
 
-	  vrms = average/3;
+	  vrms = sqrt(average);
 
-      if (average > 0)
-      {
-        for (int i=0; i<32; i++)
-          vrms = (vrms + average / vrms) / 2;
-      } else
-      {
-        vrms = 0;
-      }
 
       double irms = vrms/0.35;
 
-      if (irms < 1.03)
+      if (irms < 6750)
       {
     	Analog_Put(TIMING_CHANNEL, DOR_IDLE);
     	Analog_Put(TRIP_CHANNEL, DOR_IDLE);
@@ -481,11 +481,17 @@ void AnalogLoopbackThread(void* pData)
         if (!TimingActive)
         {
 
-          //uint32_t period = (Characteristic[NvInverseMode].k) / (pow(irms, Characteristic[NvInverseMode].a)-1);
-        	uint32_t period = (Characteristic[(int)NvInverseMode].k) / (pow(irms, Characteristic[(int)NvInverseMode].a)-1);
+          uint32_t period = 0;
+
+          TInverseMode mode = INVERSE;
+
+          uint32_t time = (uint32_t)(Characteristic[mode].k) / (pow(irms, Characteristic[mode].a)-1);
+        	//uint32_t period = (Characteristic[(int)NvInverseMode].k) / (pow(irms, Characteristic[(int)NvInverseMode].a)-1);
           //PIT_Set(TIMING_CLOCK,)
-          PIT_Enable(TIMING_CLOCK, false);
-          PIT_Enable(TIMING_CLOCK, true);
+
+          PIT_Set(TIMING_CLOCK, 2000000000, true);
+//          PIT_Enable(TIMING_CLOCK, false);
+//          PIT_Enable(TIMING_CLOCK, true);
         } else
         {
 
@@ -519,7 +525,7 @@ static void PITModuleThread(void* pData)
   {
     OS_SemaphoreWait(PITReady[SAMPLING_CLOCK],0);
     //LEDs_Toggle(LED_GREEN);
-//    OS_SemaphoreSignal(ACCELPollReady);
+    //OS_SemaphoreSignal(ACCELPollReady);
     for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
       (void)OS_SemaphoreSignal(AnalogThreadData[analogNb].semaphore);
   }
@@ -617,7 +623,6 @@ int main(void)
 			  &InitModulesThreadStack[THREAD_STACK_SIZE - 1],
 			  0); // Highest priority
 
-
   error = OS_ThreadCreate(PacketModuleThread,
 			  NULL,
 			  &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
@@ -636,6 +641,12 @@ int main(void)
   error = OS_ThreadCreate(PITModuleThread,
   			  NULL,
   			  &PITModuleThreadStack[THREAD_STACK_SIZE - 1],
+  			  3);
+
+  // TODO Trip thread
+  error = OS_ThreadCreate(TripModuleThread,
+  			  NULL,
+  			  &TripModuleThreadStack[THREAD_STACK_SIZE - 1],
   			  2);
 
 //  error = OS_ThreadCreate(I2CModuleThread,
