@@ -15,7 +15,7 @@
 
 extern OS_ECB* PacketReady;
 extern OS_ECB* RTCReady;
-extern OS_ECB* PITReady;
+//extern OS_ECB* PITReady;
 extern OS_ECB* FTMReady;
 extern OS_ECB* ACCELIntReady;
 extern OS_ECB* I2CReady;
