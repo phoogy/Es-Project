@@ -48,9 +48,12 @@
 
 
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
-#define NB_ANALOG_CHANNELS 3
+#define NB_ANALOG_CHANNELS 1
 #define BAUD_RATE (uint32_t)115200	// BaudRate
 #define DEFAULT_TOWER_NUMBER 6681	// Last four digits of student number to be used as tower number
+#define SAMPLING_CLOCK 0
+#define TIMING_CLOCK 1
+
 
 #define CMD_TOWER_STARTUP 0x04		//Tower Startup command in hex
 #define CMD_TOWER_VERSION 0x09		//Tower Version command in hex
@@ -68,12 +71,14 @@ static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((align
 //static uint32_t RTCModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t FTMModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t PITModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
+static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
+static uint32_t TripModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t AccelPollModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t AccelIntModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 //static uint32_t I2CModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
-const uint8_t ANALOG_THREAD_PRIORITIES[NB_ANALOG_CHANNELS] = {4, 5, 6};
+const uint8_t ANALOG_THREAD_PRIORITIES[3] = {4, 5, 6};
 
 /* Declared functions */
 //static bool ProtocolMode(void);
@@ -92,7 +97,7 @@ typedef struct AnalogThreadData
 /*! @brief Analog thread configuration data
  *
  */
-static TAnalogThreadData AnalogThreadData[NB_ANALOG_CHANNELS] =
+static TAnalogThreadData AnalogThreadData[3] =
 {
   {
     .semaphore = NULL,
@@ -115,9 +120,14 @@ static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. *
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
 bool DataReady;
 
+bool Tripped = false;
+bool TimingStarted = false;
+bool TimingActive = false;
+
+
 /* Semaphores */
 OS_ECB* PacketReady;
-OS_ECB* PITReady;
+//OS_ECB* PITReady;
 OS_ECB* ByteReady;
 
 
@@ -293,7 +303,7 @@ static void InitModulesThread(void* pData)
   /* Create Semaphores */
   PacketReady = OS_SemaphoreCreate(0);
   //RTCReady = OS_SemaphoreCreate(0);
-  PITReady = OS_SemaphoreCreate(0);
+  //PITReady = OS_SemaphoreCreate(0);
   //FTMReady = OS_SemaphoreCreate(0);
   //ACCELIntReady = OS_SemaphoreCreate(0);
   //I2CReady = OS_SemaphoreCreate(0);
@@ -309,7 +319,7 @@ static void InitModulesThread(void* pData)
   initialised &= Packet_Init(BAUD_RATE, CPU_BUS_CLK_HZ);		// Initialise Packet module
   initialised &= Flash_Init();						// Initialise Flash module
   initialised &= LEDs_Init();						// Initialise Led module
-  initialised &= PIT_Init(CPU_BUS_CLK_HZ, NULL, NULL);			// Initialise PIT module
+  initialised &= PIT_Init(CPU_BUS_CLK_HZ);			// Initialise PIT module
   //initialised &= RTC_Init(NULL, NULL);					// Initialise RTC module
   //initialised &= FTM_Init();						// Initialise FTM module
   //initialised &= Accel_Init(&accelSetup);				// Initialise Accel module
@@ -325,7 +335,9 @@ static void InitModulesThread(void* pData)
     initialised &= Flash_Write16((uint16_t *)NvTowerMode, (uint16_t)1);
   }
 
-  PIT_Set(1250000,true);			// Set Pit with 500ms
+
+  PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 500ms
+  PIT_Set(TIMING_CLOCK, 2000000, false);
   //FTM_Set(&FTMChannel0);		// Set FTM
 
 
@@ -340,11 +352,6 @@ static void InitModulesThread(void* pData)
 
   if (initialised)
     LEDs_On(LED_ORANGE);		// Turn on orange led if everything initialised
-
-
-
-
-
 
   TowerStartup();			// Send Tower Startup Packets
 
@@ -364,12 +371,39 @@ static void PacketModuleThread(void* pData)
 }
 
 
+static void TimingModuleThread(void* pData)
+{
+  for (;;)
+  {
+    OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
+    PIT_Enable(TIMING_CLOCK, false);
+    Tripped = true;
+  }
+}
+
+static void TripModuleThread(void* pData)
+{
+  for (;;)
+  {
+    OS_SemaphoreWait(PITReady[SAMPLING_CLOCK], 0);
+    if (Tripped)
+      Analog_Put(1, (int16_t)16383);
+    else
+      Analog_Put(0, (int16_t)16383);
+  }
+}
+
 void AnalogLoopbackThread(void* pData)
 {
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
   int16_t analogInputValue[16];
   uint8_t sampleCount = 0;
+  bool timingStart = false;
+  bool timingTripped = false;
+
+  uint8_t cycles = 0;
+  bool timingActive = false;
   for (;;)
   {
     //int16_t analogInputValue;
@@ -378,52 +412,54 @@ void AnalogLoopbackThread(void* pData)
     // Get analog sample
     Analog_Get(analogData->channelNb, &analogInputValue[sampleCount]);
     // Put analog sample
-    Analog_Put(analogData->channelNb, analogInputValue[sampleCount]);
+    Analog_Put(0, analogInputValue[sampleCount]);
 
     sampleCount++;
 
+
     if (sampleCount == sizeof(analogInputValue))
     {
+      // vrms calculation
     	int32_t sum = 0;
     	double average = 0;
+      double vrms = 0;
+
     	for (int i = 0; i < sizeof(analogInputValue); i++)
     	{
     		sum = sum + (analogInputValue[i] * analogInputValue[i]);
     	}
     	average = (double)(sum/sizeof(analogInputValue));
 
-		double vrms = average/3, last, diff = 1;
-		if (average <= 0) return 0;
-		do {
-			last = vrms;
-			vrms = (vrms + average / vrms) / 2;
-			diff = vrms - last;
-		} while (diff > MINDIFF || diff < -MINDIFF);
+    	vrms = average/3;
 
-		vrms
+      if (average > 0)
+      {
+        for (int i=0; i<32; i++)
+          vrms = (vrms + average / vrms) / 2;
+      } else
+      {
+        vrms = 0;
+      }
 
-		double vrms
+      double irms = vrms/0.35;
 
-    	//Packet_Put(0x10, , 0, 0);
+
+      if (irms < 1.03)
+      {
+        TimingActive = false;
+        Tripped = false;
+      }else
+      {
+        if (!TimingActive)
+        {
+          PIT_Enable(TIMING_CLOCK, false);
+          PIT_Enable(TIMING_CLOCK, true);
+        }
+        TimingActive = true;
+      }
+
     	sampleCount = 0;
     }
-//    if (analogData->channelNb == 0)
-//    {
-//    	y = ((analogInputValue*100)/35)*1000;
-//    	if (y < 1030)
-//    		x = 254;
-//    	else if (y > 1030)
-//    		x = 0;
-//	    Packet_Put(0x10, analogInputValue, x, 0);
-//    }
-//    // Test data
-//    if (analogData->channelNb == 0)
-//      x = analogInputValue;
-//    else if (analogData->channelNb == 1)
-//      y = analogInputValue;
-//    else if (analogData->channelNb == 2)
-//          z = analogInputValue;
-//    Packet_Put(0x10, x, y, z);
   }
 }
 
@@ -444,7 +480,7 @@ static void PITModuleThread(void* pData)
 {
   for (;;)
   {
-    OS_SemaphoreWait(PITReady,0);
+    OS_SemaphoreWait(PITReady[SAMPLING_CLOCK],0);
     //LEDs_Toggle(LED_GREEN);
 //    OS_SemaphoreSignal(ACCELPollReady);
     for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
