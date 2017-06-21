@@ -13,6 +13,9 @@
 
 // new types
 #include "types.h"
+#include "Os.h"
+
+extern OS_ECB* PITReady[4];
 
 /*! @brief Sets up the PIT before first use.
  *
@@ -23,7 +26,7 @@
  *  @return BOOL - TRUE if the PIT was successfully initialized.
  *  @note Assumes that moduleClk has a period which can be expressed as an integral number of nanoseconds.
  */
-bool PIT_Init(const uint32_t moduleClk, void (*userFunction)(void*), void* userArguments);
+bool PIT_Init(const uint32_t moduleClk);
 
 /*! @brief Sets the value of the desired period of the PIT.
  *
@@ -32,20 +35,32 @@ bool PIT_Init(const uint32_t moduleClk, void (*userFunction)(void*), void* userA
  *                 FALSE if the PIT will use the new value after a trigger event.
  *  @note The function will enable the timer and interrupts for the PIT.
  */
-void PIT_Set(const uint32_t period, const bool restart);
+void PIT_Set(const uint8_t pitClock, const uint32_t period, const bool restart);
 
 /*! @brief Enables or disables the PIT.
  *
  *  @param enable - TRUE if the PIT is to be enabled, FALSE if the PIT is to be disabled.
  */
-void PIT_Enable(const bool enable);
+void PIT_Enable(const uint8_t pitClock, const bool enable);
 
+/*! @brief Updates the current time for the PIT timer.
+ *
+ *  @param pitClock Pit clock to update.
+ *  @param updatedPeriod Period to update the current.
+ *  @param newPeriod Period to update the current.
+ */
+void PIT_Update(const uint8_t pitClock, const uint32_t updatedPeriod);
+
+void PIT_Get(const uint8_t pitClock, uint32_t * const dataPtr);
 /*! @brief Interrupt service routine for the PIT.
  *
  *  The periodic interrupt timer has timed out.
  *  The user callback function will be called.
  *  @note Assumes the PIT has been initialized.
  */
+
+
+
 void __attribute__ ((interrupt)) PIT_ISR(void);
 
 #endif
