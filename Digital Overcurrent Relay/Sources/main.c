@@ -68,6 +68,7 @@
 #define CMD_TIME 0x0C			//Time command in hex
 #define CMD_ACCEL 0x10			//Accelerometer command in hex
 #define CMD_PROTOCOL_MODE 0x0A		//Protocol Mode command in hex
+#define CMD_DOR 0x0E
 
 /* Thread stacks */
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
@@ -102,9 +103,9 @@ typedef struct AnalogThreadData
 
 typedef enum
 {
-  INVERSE = 0,
-  VERY_INVERSE = 1,
-  EXTREMELY_INVERSE = 2
+  INVERSE = (uint8_t)0,
+  VERY_INVERSE = (uint8_t)1,
+  EXTREMELY_INVERSE = (uint8_t)2
 } TInverseMode;
 
 
@@ -167,7 +168,10 @@ static TAnalogThreadData AnalogThreadData[3] =
 static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. */
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
 static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Tower Mode. */
-
+static volatile uint8_t *NvTimesTripped;	/*!< The non-volatile Tower Mode. */
+//static volatile uint8_t *NvLastFaultType;	/*!< The non-volatile Tower Mode. */
+uint8_t LastFaultType;
+uint8_t LastCurrent[3];
 //bool DataReady;
 
 bool TimingStarted = false;
@@ -276,6 +280,42 @@ static bool ReadByte(void)
   return packetFlag;
 }
 
+static bool DOR(void)
+{
+  bool packetFlag = false;
+  if (Packet_Parameter1 == 0 && Packet_Parameter3 == 0)
+  {
+	  switch(Packet_Parameter2)
+	  {
+	  	  case 0:
+		  //Send Characteristic
+	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, *NvInverseMode,0);
+	  		break;
+	  	  case 1:
+	  		// TODO get current
+	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, 0,0);
+	  		// send current
+	  		//packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, ,0);
+	  		break;
+	  	  case 2:
+	  		// send number of times tripped
+	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, *NvTimesTripped,0);
+	  		break;
+	  	  case 3:
+	  		// TODO type of last fault detected
+	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, 0,0);
+	  		break;
+	  }
+  }else if (Packet_Parameter1 == 1 && Packet_Parameter3 == 0 && (Packet_Parameter2 == 0 ||Packet_Parameter2 == 1 ||Packet_Parameter2 == 2))
+  {
+	  packetFlag = Flash_Write8((uint8_t *)NvInverseMode, Packet_Parameter2);
+  }
+
+  //if (Packet_Parameter1 >= 0 && Packet_Parameter1 <= 7 && Packet_Parameter2 == 0 && Packet_Parameter3 == 0)
+   // packetFlag = Packet_Put(CMD_READ_BYTE, Packet_Parameter1, 0, _FB(FLASH_DATA_START + Packet_Parameter1));
+  return packetFlag;
+}
+
 
 /*
  * @brief Determines the packet's instructions and calls the relevant function.
@@ -304,6 +344,10 @@ static void HandlePacket(void)
     case CMD_PROGRAM_BYTE:
       ackFlag = ProgramByte();
       break;
+    case CMD_DOR:
+	  ackFlag = DOR();
+	  break;
+
 //    case CMD_TIME:
 //      ackFlag = SetTime();
 //      break;
@@ -362,27 +406,31 @@ static void InitModulesThread(void* pData)
   initialised &= Flash_AllocateVar((volatile void**)&NvTowerNb, sizeof(*NvTowerNb));		// Allocate Flash space for Tower number
   initialised &= Flash_AllocateVar((volatile void**)&NvTowerMode, sizeof(*NvTowerMode));	// Allocate Flash space for Tower mode
 
+  /* Allocate Flash Memory for Inverse Mode */
+  initialised &= Flash_AllocateVar((volatile void**)&NvInverseMode, sizeof(*NvInverseMode));
+  initialised &= Flash_AllocateVar((volatile void**)&NvTimesTripped, sizeof(*NvTimesTripped));
+  initialised &= Flash_AllocateVar((volatile void**)&NvLastFaultType, sizeof(*NvLastFaultType));
+
   /* If the tower number and tower mode is cleared then write default to flash */
   if (_FH(FLASH_DATA_START) == 0xFFFF)
   {
     initialised &= Flash_Write16((uint16_t *)NvTowerNb, (uint16_t)DEFAULT_TOWER_NUMBER);
     initialised &= Flash_Write16((uint16_t *)NvTowerMode, (uint16_t)1);
+
+	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
+    initialised &= Flash_Write8((uint8_t *)NvTimesTripped, 0);
+    initialised &= Flash_Write8((uint8_t *)NvLastFaultType, 0);
   }
 
-  /* Allocate Flash Memory for Inverse Mode */
-  initialised &= Flash_AllocateVar((volatile void**)&NvInverseMode, sizeof(*NvInverseMode));	// Allocate Flash space for Tower mode
 
-  /* If no valid Inverse mode is set then set to default INVERSE*/
-  uint8_t testVar = *NvInverseMode;
 
-  if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE ||* NvInverseMode != EXTREMELY_INVERSE)
-	initialised &= Flash_Write8((uint8_t *)&NvInverseMode, INVERSE);
+  ///* If no valid Inverse mode is set then set to default INVERSE*/
+  //if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE ||* NvInverseMode != EXTREMELY_INVERSE)
+
 
   PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
 
-
-  //PIT_Set(TIMING_CLOCK, 2000000, false);
-
+  uint8_t testVar1, testVar2, testVar3;
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
@@ -440,9 +488,11 @@ void AnalogLoopbackThread(void* pData)
   static const uint8_t nbSamples = 16;
   int16_t analogInputValue[nbSamples];
   uint8_t sampleCount = 0;
-
+  uint32_t time = 0;
+  uint32_t previousTotalTime = 0;
   uint8_t cycles = 0;
   bool timingActive = false;
+  double timingCyclePercentage = 0;
   for (;;)
   {
     (void)OS_SemaphoreWait(analogData->semaphore, 0);
@@ -465,13 +515,19 @@ void AnalogLoopbackThread(void* pData)
 		sum = sum + (analogInputValue[i] * analogInputValue[i]);
 	  }
 	  average = (sum/nbSamples);
-
 	  vrms = sqrt(average);
 
-
+	  // Vrms --> Irms
+	  // 0.350mV ~ 1
       double irms = vrms/0.35;
 
-      if (irms < 6750)
+      /* 1.03 Irms is the current used to activate the trip
+       * When V = 10pp
+       * 1.03Irms = 65534 / 10 * 1.03
+       * 1.03Irms = 6750.002
+       */
+
+      if (irms < 6750.002)
       {
     	Analog_Put(TIMING_CHANNEL, DOR_IDLE);
     	Analog_Put(TRIP_CHANNEL, DOR_IDLE);
@@ -479,23 +535,53 @@ void AnalogLoopbackThread(void* pData)
       }else
       {
         if (!TimingActive)
-        {
+          PIT_Set(TIMING_CLOCK, 1000000000, true);
 
-          uint32_t period = 0;
 
-          TInverseMode mode = INVERSE;
+	    // time = k / ((Irms^2)-1) This is in Seconds so we need to change it into nanoseconds
+	    // time = time * 1000000000
+	    switch(*NvInverseMode)
+	    {
+		  case INVERSE:
+			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
+			break;
+		  case VERY_INVERSE:
+			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
+			break;
+		  case EXTREMELY_INVERSE:
+			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
+			break;
+	    }
+          uint32_t timeLeft = 0;
 
-          uint32_t time = (uint32_t)(Characteristic[mode].k) / (pow(irms, Characteristic[mode].a)-1);
+          if (!TimingActive)
+          {
+        	previousTotalTime = time;
+        	timingCyclePercentage = 0;
+        	PIT_Get(TIMING_CLOCK, &timeLeft);
+        	time = time - 1000000000 + timeLeft;
+          }
+          else
+          {
+        	PIT_Get(TIMING_CLOCK, &timeLeft);
+        	timingCyclePercentage = timingCyclePercentage + (timeLeft/previousTotalTime);
+        	time = timeLeft * (1 - timingCyclePercentage);
+        	previousTotalTime = time;
+          }
+          if (time < 1)
+        	time = 0;
+          PIT_Set(TIMING_CLOCK, time, true);
+
+          //uint32_t period = 0;
+
+
+          //uint32_t time = (uint32_t)(Characteristic[mode].k) / (pow(irms, Characteristic[mode].a)-1);
         	//uint32_t period = (Characteristic[(int)NvInverseMode].k) / (pow(irms, Characteristic[(int)NvInverseMode].a)-1);
           //PIT_Set(TIMING_CLOCK,)
 
-          PIT_Set(TIMING_CLOCK, 2000000000, true);
+          //PIT_Set(TIMING_CLOCK, 2000000000, true);
 //          PIT_Enable(TIMING_CLOCK, false);
 //          PIT_Enable(TIMING_CLOCK, true);
-        } else
-        {
-
-        }
 
         Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
         TimingActive = true;
