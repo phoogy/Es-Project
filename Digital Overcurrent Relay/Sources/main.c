@@ -43,7 +43,7 @@
 #include "analog.h"
 
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
-#define NB_ANALOG_CHANNELS 1
+#define NB_ANALOG_CHANNELS 3
 #define BAUD_RATE (uint32_t)115200	// BaudRate
 #define DEFAULT_TOWER_NUMBER 6681	// Last four digits of student number to be used as tower number
 #define SAMPLING_CLOCK 0
@@ -69,7 +69,7 @@
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t PITModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-static uint32_t TripModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
+static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 const uint8_t ANALOG_THREAD_PRIORITIES[3] = {4, 5, 6};
@@ -151,8 +151,8 @@ static TAnalogThreadData AnalogThreadData[3] =
 /* Declared variables */
 static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. */
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
-static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Tower Mode. */
-static volatile uint16union_t *NvTimesTripped;	/*!< The non-volatile Tower Mode. */
+static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Inverse Mode. */
+static volatile uint16union_t *NvTimesTripped;	/*!< The non-volatile number of times tripped. */
 
 uint8_t LastFaultType;
 uint8_t LastCurrent[3];
@@ -166,27 +166,6 @@ uint32_t TimingCounter[3];
 
 
 
-static bool Analog_Get_Debug(const uint8_t channelNb, int16_t* const valuePtr)
-{
-  uint8_t i;
-  int16_t data[16] = {-32768, -28672, -24576, -20480, -16384, -12288,
-		  -8192,
-		  -4096,
-		  0,
-		  4096,
-		  8192,
-		  12288,
-		  16384,
-		  20480,
-		  24576,
-		  28672
-};
-  if (i < 0 || i > 15)
-	i = 0;
-  *valuePtr = data[i];
-  i++;
-  return true;
-}
 
 
 
@@ -311,7 +290,7 @@ static bool DOR(void)
 	  		break;
 	  	  case 2:
 	  		// send number of times tripped
-	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, *NvTimesTripped,0);
+	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, NvTimesTripped->s.Hi, NvTimesTripped->s.Lo);
 	  		break;
 	  	  case 3:
 	  		// TODO type of last fault detected
@@ -409,7 +388,7 @@ static void InitModulesThread(void* pData)
     initialised &= Flash_Write16((uint16_t *)NvTowerMode, (uint16_t)1);
 
 	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
-    initialised &= Flash_Write8((uint16_t *)NvTimesTripped, 0);
+    initialised &= Flash_Write16((uint16_t *)NvTimesTripped, 0);
   }
 
   ///* If no valid Inverse mode is set then set to default INVERSE*/
@@ -446,28 +425,18 @@ static void TimingModuleThread(void* pData)
   for (;;)
   {
     OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-    for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
-    {
-	  if (TimingCounter[analogNb] > 0)
-	  {
-		TimingCounter[analogNb]--;
-		if (TimingCounter[analogNb] == 0)
-		{
-		  Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
-		  Flash_Write16((uint16_t *)NvTimesTripped, (*NvTimesTripped+1));
-		}
-	  }
-    }
-  }
-}
-
-static void TripModuleThread(void* pData)
-{
-  for (;;)
-  {
-    OS_SemaphoreWait(PITReady[TRIP_CHANNEL], 0);
-    PIT_Enable(TIMING_CLOCK, false);
-    Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
+//    for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
+//    {
+//	  if (TimingCounter[analogNb] > 0)
+//	  {
+//		TimingCounter[analogNb]--;
+//		if (TimingCounter[analogNb] == 0)
+//		{
+//		  Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
+//		  Flash_Write16((uint16_t *)NvTowerNb, (NvTimesTripped->l + 1));
+//		}
+//	  }
+//    }
   }
 }
 
@@ -476,91 +445,77 @@ void AnalogLoopbackThread(void* pData)
   // Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
   static const uint8_t nbSamples = 16;
-  int16_t analogInputValue[nbSamples];
-  uint8_t sampleCount = 0;
+  int16_t analogInputValue[analogData->channelNb][nbSamples];
+  uint8_t sampleCount[analogData->channelNb];
   uint32_t time = 0;
-  uint32_t previousTotalTime = 0;
-  uint8_t cycles = 0;
-  bool timingActive = false;
+  uint32_t previousTotalTime[analogData->channelNb];
+  bool timingActive[analogData->channelNb];
+  double timingCyclePercentage[analogData->channelNb];
 
-  double timingCyclePercentage = 0;
   for (;;)
   {
+
     (void)OS_SemaphoreWait(analogData->semaphore, 0);
     // Get analog sample
-    Analog_Get(analogData->channelNb, &analogInputValue[sampleCount]);
-    // Put analog sample
-    //Analog_Put(0, analogInputValue[sampleCount]);
+    Analog_Get(analogData->channelNb, &analogInputValue[analogData->channelNb][sampleCount[analogData->channelNb]]);
 
-    for (uint8_t analogNb = 0; analogNb < 3; analogNb++)
-      TimingCounter[analogNb] = 10000;
-    sampleCount++;
-
-//    if (sampleCount == nbSamples)
-//    {
-      // vrms calculation
-      int32_t sum = 0;
-      double average = 0;
-      double vrms = 0;
-
-	  for (int i = 0; i < nbSamples; i++)
-	  {
-		sum = sum + (analogInputValue[i] * analogInputValue[i]);
-	  }
-	  average = (sum/nbSamples);
-	  vrms = sqrt(average);
-	  // Vrms --> Irms
-	  // 0.350mV ~ 1
-      double irms = vrms/0.35;
-
-      /* 1.03 Irms is the current used to activate the trip
-       * When V = 10pp
-       * 1.03Irms = 65534 / 10 * 1.03
-       * 1.03Irms = 6750.002
-       */
-
-      if (irms < 6750.002)
-      {
-    	Analog_Put(TIMING_CHANNEL, DOR_IDLE);
-    	Analog_Put(TRIP_CHANNEL, DOR_IDLE);
-        TimingActive = false;
-      }else
-      {
-        if (!TimingActive)
-          PIT_Set(TIMING_CLOCK, 1000000000, true);
-
-	    // time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
-	    // time = time * 1000000000
-
-        time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000;
-
-		uint32_t timeLeft = 0;
-
-		if (!TimingActive)
-		{
-		previousTotalTime = time;
-		timingCyclePercentage = 0;
-		PIT_Get(TIMING_CLOCK, &timeLeft);
-		time = time - 1000000000 + timeLeft;
-		}
-		else
-		{
-		PIT_Get(TIMING_CLOCK, &timeLeft);
-		timingCyclePercentage = timingCyclePercentage + (timeLeft/previousTotalTime);
-		time = timeLeft * (1 - timingCyclePercentage);
-		previousTotalTime = time;
-		}
-		if (time < 1)
-		time = 0;
-		PIT_Set(TIMING_CLOCK, time, true);
-
-        Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
-        TimingActive = true;
-      //}
-
-	if (sampleCount == nbSamples)
-      sampleCount = 0;
+    if (TimingCounter[analogData->channelNb] == 0)
+    {
+    	TimingCounter[analogData->channelNb] = 10000;
+    	previousTotalTime[analogData->channelNb] = 10000;
     }
+
+    sampleCount[analogData->channelNb]++;
+
+    if (sampleCount[analogData->channelNb] == nbSamples)
+	  sampleCount[analogData->channelNb] = 0;
+
+      // vrms calculation
+
+	int32_t sum = 0;
+	double average = 0;
+	double vrms = 0;
+
+	for (int i = 0; i < nbSamples; i++)
+	{
+	sum = sum + (analogInputValue[analogData->channelNb][i] * analogInputValue[analogData->channelNb][i]);
+	}
+	average = (sum/nbSamples);
+	vrms = sqrt(average);
+	// Vrms --> Irms
+	// 0.350mV ~ 1
+	double irms = vrms/0.35;
+
+	/* 1.03 Irms is the current used to activate the trip
+	* When V = 10pp
+	* 1.03Irms = 65534 / 10 * 1.03
+	* 1.03Irms = 6750.002
+	*/
+
+	if (irms < 6750.002)
+	{
+	TimingCounter[analogData->channelNb] = 0;
+	Analog_Put(TIMING_CHANNEL, DOR_IDLE);
+	Analog_Put(TRIP_CHANNEL, DOR_IDLE);
+
+	}else
+	{
+	// time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
+	// time = time * 1000000000
+
+	time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000;
+
+	uint32_t timeLeft = TimingCounter[analogData->channelNb];
+
+	timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft/previousTotalTime[analogData->channelNb]);
+	time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
+	previousTotalTime[analogData->channelNb] = time;
+
+	if (time < 1)
+		time = 1;
+	TimingCounter[analogData->channelNb] = (uint32_t)time;
+	}
+
   }
 }
 
@@ -571,15 +526,6 @@ static void PITModuleThread(void* pData)
     OS_SemaphoreWait(PITReady[SAMPLING_CLOCK],0);
     for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
       (void)OS_SemaphoreSignal(AnalogThreadData[analogNb].semaphore);
-  }
-}
-
-static void FTMModuleThread(void* pData)
-{
-  for (;;)
-  {
-    OS_SemaphoreWait(FTMReady,0);
-    LEDs_Toggle(LED_BLUE);			// Toggle Blue Led
   }
 }
 
@@ -606,16 +552,16 @@ int main(void)
 			  &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
 			  1);
 
+
+  error = OS_ThreadCreate(TimingModuleThread,
+  			  NULL,
+  			  &TimingModuleThreadStack[THREAD_STACK_SIZE - 1],
+  			  2);
+
   error = OS_ThreadCreate(PITModuleThread,
   			  NULL,
   			  &PITModuleThreadStack[THREAD_STACK_SIZE - 1],
   			  3);
-
-  // TODO Trip thread
-  error = OS_ThreadCreate(TripModuleThread,
-  			  NULL,
-  			  &TripModuleThreadStack[THREAD_STACK_SIZE - 1],
-  			  2);
 
     for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
     {
