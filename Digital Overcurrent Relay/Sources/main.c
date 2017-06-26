@@ -152,7 +152,7 @@ static TAnalogThreadData AnalogThreadData[3] =
 static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. */
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
 static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Tower Mode. */
-static volatile uint8_t *NvTimesTripped;	/*!< The non-volatile Tower Mode. */
+static volatile uint16union_t *NvTimesTripped;	/*!< The non-volatile Tower Mode. */
 
 uint8_t LastFaultType;
 uint8_t LastCurrent[3];
@@ -344,11 +344,6 @@ static void HandlePacket(void)
     ACKNAK(ackFlag);
 }
 
-
-
-
-
-
 /*! @brief Initialises the modules.
  *
  *  @param pData is not used but is required by the OS to create a thread.
@@ -387,15 +382,14 @@ static void InitModulesThread(void* pData)
     initialised &= Flash_Write16((uint16_t *)NvTowerMode, (uint16_t)1);
 
 	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
-    initialised &= Flash_Write8((uint8_t *)NvTimesTripped, 0);
+    initialised &= Flash_Write8((uint16_t *)NvTimesTripped, 0);
   }
 
   ///* If no valid Inverse mode is set then set to default INVERSE*/
 
   PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
-
   PIT_Set(TIMING_CLOCK, 1000000, true);
-  uint8_t testVar1, testVar2, testVar3;
+
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
@@ -420,23 +414,23 @@ static void PacketModuleThread(void* pData)
   }
 }
 
-
 static void TimingModuleThread(void* pData)
 {
   for (;;)
   {
     OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-    // Decrement counter or something
     for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
     {
-    	if (TimingCounter[analogNb] > 0)
-    	{
-    		TimingCounter[analogNb]--;
-    		if
-    	}
+	  if (TimingCounter[analogNb] > 0)
+	  {
+		TimingCounter[analogNb]--;
+		if (TimingCounter[analogNb] == 0)
+		{
+		  Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
+		  Flash_Write16((uint16_t *)NvTimesTripped, (*NvTimesTripped+1));
+		}
+	  }
     }
-
-
   }
 }
 
@@ -461,6 +455,7 @@ void AnalogLoopbackThread(void* pData)
   uint32_t previousTotalTime = 0;
   uint8_t cycles = 0;
   bool timingActive = false;
+
   double timingCyclePercentage = 0;
   for (;;)
   {
@@ -470,10 +465,12 @@ void AnalogLoopbackThread(void* pData)
     // Put analog sample
     //Analog_Put(0, analogInputValue[sampleCount]);
 
+    for (uint8_t analogNb = 0; analogNb < 3; analogNb++)
+      TimingCounter[analogNb] = 10000;
     sampleCount++;
 
-    if (sampleCount == nbSamples)
-    {
+//    if (sampleCount == nbSamples)
+//    {
       // vrms calculation
       int32_t sum = 0;
       double average = 0;
@@ -485,7 +482,6 @@ void AnalogLoopbackThread(void* pData)
 	  }
 	  average = (sum/nbSamples);
 	  vrms = sqrt(average);
-
 	  // Vrms --> Irms
 	  // 0.350mV ~ 1
       double irms = vrms/0.35;
@@ -506,21 +502,11 @@ void AnalogLoopbackThread(void* pData)
         if (!TimingActive)
           PIT_Set(TIMING_CLOCK, 1000000000, true);
 
-
-	    // time = k / ((Irms^2)-1) This is in Seconds so we need to change it into nanoseconds
+	    // time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
 	    // time = time * 1000000000
-	    switch(*NvInverseMode)
-	    {
-		  case INVERSE:
-			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
-			break;
-		  case VERY_INVERSE:
-			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
-			break;
-		  case EXTREMELY_INVERSE:
-			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
-			break;
-	    }
+
+        time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000;
+
 		uint32_t timeLeft = 0;
 
 		if (!TimingActive)
@@ -543,8 +529,9 @@ void AnalogLoopbackThread(void* pData)
 
         Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
         TimingActive = true;
-      }
+      //}
 
+	if (sampleCount == nbSamples)
       sampleCount = 0;
     }
   }
