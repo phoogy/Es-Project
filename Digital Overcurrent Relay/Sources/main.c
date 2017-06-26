@@ -39,11 +39,6 @@
 #include "LEDs.h"
 #include "Flash.h"
 #include "PIT.h"
-//#include "RTC.h"
-//#include "FTM.h"
-//#include "median.h"
-//#include "I2C.h"
-//#include "accel.h"
 #include "Semaphore.h"
 #include "analog.h"
 
@@ -73,22 +68,13 @@
 /* Thread stacks */
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t RTCModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t FTMModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t PITModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t TripModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t AccelPollModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t AccelIntModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
-//static uint32_t I2CModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 const uint8_t ANALOG_THREAD_PRIORITIES[3] = {4, 5, 6};
 
 /* Declared functions */
-//static bool ProtocolMode(void);
-
-
 
 /*! @brief Data structure used to pass Analog configuration to a user thread
  *
@@ -99,8 +85,6 @@ typedef struct AnalogThreadData
   uint8_t channelNb;
 } TAnalogThreadData;
 
-
-
 typedef enum
 {
   INVERSE = (uint8_t)0,
@@ -108,10 +92,10 @@ typedef enum
   EXTREMELY_INVERSE = (uint8_t)2
 } TInverseMode;
 
-
 /*! @brief Data structure used to calculate the timing used for tripping
  *
  */
+
 typedef struct Characteristic
 {
   TInverseMode mode;
@@ -169,13 +153,14 @@ static volatile uint16union_t *NvTowerNb; 	/*!< The non-volatile Tower number. *
 static volatile uint16union_t *NvTowerMode;	/*!< The non-volatile Tower Mode. */
 static volatile uint8_t *NvInverseMode;	/*!< The non-volatile Tower Mode. */
 static volatile uint8_t *NvTimesTripped;	/*!< The non-volatile Tower Mode. */
-//static volatile uint8_t *NvLastFaultType;	/*!< The non-volatile Tower Mode. */
+
 uint8_t LastFaultType;
 uint8_t LastCurrent[3];
-//bool DataReady;
 
 bool TimingStarted = false;
 bool TimingActive = false;
+
+uint32_t TimingCounter[3];
 
 /* Semaphores */
 
@@ -288,7 +273,7 @@ static bool DOR(void)
 	  switch(Packet_Parameter2)
 	  {
 	  	  case 0:
-		  //Send Characteristic
+		    //Send Characteristic
 	  		packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, *NvInverseMode,0);
 	  		break;
 	  	  case 1:
@@ -375,18 +360,6 @@ static void InitModulesThread(void* pData)
 
   /* Local variable definitions */
   bool initialised = true;
-  //AccelMode = ACCEL_POLL;
-  //DataReady = true;
-
-  /* Create Semaphores */
-  //PacketReady = OS_SemaphoreCreate(0);
-  //RTCReady = OS_SemaphoreCreate(0);
-  //PITReady = OS_SemaphoreCreate(0);
-  //FTMReady = OS_SemaphoreCreate(0);
-  //ACCELIntReady = OS_SemaphoreCreate(0);
-  //I2CReady = OS_SemaphoreCreate(0);
-  //ACCELPollReady = OS_SemaphoreCreate(0);
-
 
   // Generate the global analog semaphores
   for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
@@ -398,9 +371,6 @@ static void InitModulesThread(void* pData)
   initialised &= Flash_Init();						// Initialise Flash module
   initialised &= LEDs_Init();						// Initialise Led module
   initialised &= PIT_Init(CPU_BUS_CLK_HZ);			// Initialise PIT module
-  //initialised &= RTC_Init(NULL, NULL);					// Initialise RTC module
-  //initialised &= FTM_Init();						// Initialise FTM module
-  //initialised &= Accel_Init(&accelSetup);				// Initialise Accel module
 
   /* Allocate Flash Memory for Tower Number and Tower Mode */
   initialised &= Flash_AllocateVar((volatile void**)&NvTowerNb, sizeof(*NvTowerNb));		// Allocate Flash space for Tower number
@@ -409,7 +379,6 @@ static void InitModulesThread(void* pData)
   /* Allocate Flash Memory for Inverse Mode */
   initialised &= Flash_AllocateVar((volatile void**)&NvInverseMode, sizeof(*NvInverseMode));
   initialised &= Flash_AllocateVar((volatile void**)&NvTimesTripped, sizeof(*NvTimesTripped));
-  initialised &= Flash_AllocateVar((volatile void**)&NvLastFaultType, sizeof(*NvLastFaultType));
 
   /* If the tower number and tower mode is cleared then write default to flash */
   if (_FH(FLASH_DATA_START) == 0xFFFF)
@@ -419,23 +388,17 @@ static void InitModulesThread(void* pData)
 
 	initialised &= Flash_Write8((uint8_t *)NvInverseMode, INVERSE);
     initialised &= Flash_Write8((uint8_t *)NvTimesTripped, 0);
-    initialised &= Flash_Write8((uint8_t *)NvLastFaultType, 0);
   }
 
-
-
   ///* If no valid Inverse mode is set then set to default INVERSE*/
-  //if (*NvInverseMode != INVERSE || *NvInverseMode != VERY_INVERSE ||* NvInverseMode != EXTREMELY_INVERSE)
-
 
   PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
 
+  PIT_Set(TIMING_CLOCK, 1000000, true);
   uint8_t testVar1, testVar2, testVar3;
 
   // Analog
   (void)Analog_Init(CPU_BUS_CLK_HZ);
-
-
 
   if (initialised)
     LEDs_On(LED_ORANGE);		// Turn on orange led if everything initialised
@@ -458,18 +421,24 @@ static void PacketModuleThread(void* pData)
 }
 
 
-//static void TimingModuleThread(void* pData)
-//{
-//  for (;;)
-//  {
-//    OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
+static void TimingModuleThread(void* pData)
+{
+  for (;;)
+  {
+    OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
+    // Decrement counter or something
+    for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
+    {
+    	if (TimingCounter[analogNb] > 0)
+    	{
+    		TimingCounter[analogNb]--;
+    		if
+    	}
+    }
 
 
-//    PIT_Enable(TIMING_CLOCK, false);
-
-
-//  }
-//}
+  }
+}
 
 static void TripModuleThread(void* pData)
 {
@@ -552,36 +521,25 @@ void AnalogLoopbackThread(void* pData)
 			time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a)-1))*1000000000;
 			break;
 	    }
-          uint32_t timeLeft = 0;
+		uint32_t timeLeft = 0;
 
-          if (!TimingActive)
-          {
-        	previousTotalTime = time;
-        	timingCyclePercentage = 0;
-        	PIT_Get(TIMING_CLOCK, &timeLeft);
-        	time = time - 1000000000 + timeLeft;
-          }
-          else
-          {
-        	PIT_Get(TIMING_CLOCK, &timeLeft);
-        	timingCyclePercentage = timingCyclePercentage + (timeLeft/previousTotalTime);
-        	time = timeLeft * (1 - timingCyclePercentage);
-        	previousTotalTime = time;
-          }
-          if (time < 1)
-        	time = 0;
-          PIT_Set(TIMING_CLOCK, time, true);
-
-          //uint32_t period = 0;
-
-
-          //uint32_t time = (uint32_t)(Characteristic[mode].k) / (pow(irms, Characteristic[mode].a)-1);
-        	//uint32_t period = (Characteristic[(int)NvInverseMode].k) / (pow(irms, Characteristic[(int)NvInverseMode].a)-1);
-          //PIT_Set(TIMING_CLOCK,)
-
-          //PIT_Set(TIMING_CLOCK, 2000000000, true);
-//          PIT_Enable(TIMING_CLOCK, false);
-//          PIT_Enable(TIMING_CLOCK, true);
+		if (!TimingActive)
+		{
+		previousTotalTime = time;
+		timingCyclePercentage = 0;
+		PIT_Get(TIMING_CLOCK, &timeLeft);
+		time = time - 1000000000 + timeLeft;
+		}
+		else
+		{
+		PIT_Get(TIMING_CLOCK, &timeLeft);
+		timingCyclePercentage = timingCyclePercentage + (timeLeft/previousTotalTime);
+		time = timeLeft * (1 - timingCyclePercentage);
+		previousTotalTime = time;
+		}
+		if (time < 1)
+		time = 0;
+		PIT_Set(TIMING_CLOCK, time, true);
 
         Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
         TimingActive = true;
@@ -592,26 +550,11 @@ void AnalogLoopbackThread(void* pData)
   }
 }
 
-
-//static void RTCModuleThread(void* pData)
-//{
-//  uint8_t hours, minutes, seconds;	// Declare variables to get time
-//  for (;;)
-//  {
-//    OS_SemaphoreWait(RTCReady, 0);
-//    RTC_Get(&hours, &minutes, &seconds);		// Get time variables
-//    Packet_Put(CMD_TIME, hours, minutes, seconds);	// Send Time
-//    LEDs_Toggle(LED_YELLOW);				// Toggle Yellow Led
-//  }
-//}
-
 static void PITModuleThread(void* pData)
 {
   for (;;)
   {
     OS_SemaphoreWait(PITReady[SAMPLING_CLOCK],0);
-    //LEDs_Toggle(LED_GREEN);
-    //OS_SemaphoreSignal(ACCELPollReady);
     for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
       (void)OS_SemaphoreSignal(AnalogThreadData[analogNb].semaphore);
   }
@@ -625,71 +568,6 @@ static void FTMModuleThread(void* pData)
     LEDs_Toggle(LED_BLUE);			// Toggle Blue Led
   }
 }
-
-//static void AccelPollModuleThread(void* pData)
-//{
-//  for (;;)
-//  {
-//    OS_SemaphoreWait(ACCELPollReady,0);
-//    if (AccelMode == ACCEL_POLL)
-//    {
-//      PreviousAccelData.axes.x = CurrentAccelData.axes.x;
-//      PreviousAccelData.axes.y = CurrentAccelData.axes.y;
-//      PreviousAccelData.axes.z = CurrentAccelData.axes.z;
-//
-//      Accel_ReadXYZ(CurrentAccelData.bytes);	// Read Accel Data
-//
-//      if (PreviousAccelData.axes.x != CurrentAccelData.axes.x || PreviousAccelData.axes.y != CurrentAccelData.axes.y || PreviousAccelData.axes.z != CurrentAccelData.axes.z)
-//      {
-//	Packet_Put(CMD_ACCEL, CurrentAccelData.axes.x, CurrentAccelData.axes.y, CurrentAccelData.axes.z);
-//	LEDs_Toggle(LED_GREEN);			// Toggle Green Led
-//      }
-//    }
-//  }
-//}
-
-//static void AccelIntModuleThread(void* pData)
-//{
-//  for (;;)
-//  {
-//    OS_SemaphoreWait(ACCELIntReady,0);
-//    if (DataReady)
-//    {
-//      // DataReady set to false so new data isn't initialised half way through a reading
-//      DataReady = false;
-//      for (int i = 2; i > 0; i--)
-//      {
-//	AccelData[i].axes.x = AccelData[i-1].axes.x;
-//	AccelData[i].axes.y = AccelData[i-1].axes.y;
-//	AccelData[i].axes.z = AccelData[i-1].axes.z;
-//      }
-//
-//      // Call I2C_IntRead
-//      I2C_IntRead(0x01, AccelData[0].bytes, 3);
-//    }
-//  }
-//}
-
-//static void I2CModuleThread(void* pData)
-//{
-//  for (;;)
-//  {
-//    OS_SemaphoreWait(I2CReady,0);
-//    // Median filter the last 3 sets of data
-//    CurrentAccelData.axes.x = Median_Filter3(AccelData[0].axes.x,AccelData[1].axes.x,AccelData[2].axes.x);
-//    CurrentAccelData.axes.y = Median_Filter3(AccelData[0].axes.y,AccelData[1].axes.y,AccelData[2].axes.y);
-//    CurrentAccelData.axes.z = Median_Filter3(AccelData[0].axes.z,AccelData[1].axes.z,AccelData[2].axes.z);
-//
-//    // Sends the data
-//    Packet_Put(CMD_ACCEL, CurrentAccelData.axes.x, CurrentAccelData.axes.y, CurrentAccelData.axes.z);
-//
-//    // Toggle Led
-//    LEDs_Toggle(LED_GREEN);
-//
-//    // DataReady set to true to receive next data
-//    DataReady = true;
-//  }
-//}
 
 /*lint -save  -e970 Disable MISRA rule (6.3) checking. */
 int main(void)
@@ -714,16 +592,6 @@ int main(void)
 			  &PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
 			  1);
 
-//  error = OS_ThreadCreate(RTCModuleThread,
-//    			  NULL,
-//    			  &RTCModuleThreadStack[THREAD_STACK_SIZE - 1],
-//    			  2);
-
-//  error = OS_ThreadCreate(FTMModuleThread,
-//  			  NULL,
-//  			  &FTMModuleThreadStack[THREAD_STACK_SIZE - 1],
-//  			  3);
-
   error = OS_ThreadCreate(PITModuleThread,
   			  NULL,
   			  &PITModuleThreadStack[THREAD_STACK_SIZE - 1],
@@ -734,22 +602,6 @@ int main(void)
   			  NULL,
   			  &TripModuleThreadStack[THREAD_STACK_SIZE - 1],
   			  2);
-
-//  error = OS_ThreadCreate(I2CModuleThread,
-//    			  NULL,
-//    			  &I2CModuleThreadStack[THREAD_STACK_SIZE - 1],
-//    			  5);
-
-//  error = OS_ThreadCreate(AccelIntModuleThread,
-//  			  NULL,
-//  			  &AccelIntModuleThreadStack[THREAD_STACK_SIZE - 1],
-//  			  6);
-
-//  error = OS_ThreadCreate(AccelPollModuleThread,
-//  			  NULL,
-//  			  &AccelPollModuleThreadStack[THREAD_STACK_SIZE - 1],
-//  			  7);
-
 
     for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
     {
