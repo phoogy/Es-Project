@@ -164,6 +164,33 @@ uint32_t TimingCounter[3];
 
 /* Semaphores */
 
+
+
+static bool Analog_Get_Debug(const uint8_t channelNb, int16_t* const valuePtr)
+{
+  uint8_t i;
+  int16_t data[16] = {-32768, -28672, -24576, -20480, -16384, -12288,
+		  -8192,
+		  -4096,
+		  0,
+		  4096,
+		  8192,
+		  12288,
+		  16384,
+		  20480,
+		  24576,
+		  28672
+};
+  if (i < 0 || i > 15)
+	i = 0;
+  *valuePtr = data[i];
+  i++;
+  return true;
+}
+
+
+
+
 /*
  * @brief Sends or Sets the Tower Number.
  * @return bool TRUE if packet was successfully put into the TxFIFO buffer.
