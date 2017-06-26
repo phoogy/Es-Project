@@ -41,12 +41,12 @@ bool Packet_Get(void)
     {
       if (Packet_Checksum == (Packet_Command ^ Packet_Parameter1 ^ Packet_Parameter2 ^ Packet_Parameter3))
       {
-	NumBytes = 0;
-	Packet_Checksum = 0;
-	return true;
+    	NumBytes = 0;
+    	Packet_Checksum = 0;
+    	return true;
       }
       else
-	NumBytes--;
+    	NumBytes--;
     }
     // Shifts the bytes forward if any one fails to transmit
     Packet_Command = Packet_Parameter1;
