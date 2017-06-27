@@ -65,7 +65,7 @@
 #define CMD_ACCEL 0x10			//Accelerometer command in hex
 #define CMD_PROTOCOL_MODE 0x0A		//Protocol Mode command in hex
 #define CMD_DOR 0x0E
-//gfhfdghgf
+
 /* Thread stacks */
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
@@ -89,8 +89,15 @@ typedef struct AnalogThreadData
 		uint8_t channelNb;
 		int16_t analogInputValues[NB_SAMPLES];
 		int16_t *dataPtr;
-		uint8_t ptrPos;
+		uint8_t sampleCount;
 		uint32_t previousTotalTime;
+		double sum;
+		double average;
+		double vrms;
+		double irms;
+		uint32_t time;
+		uint32_t timeLeft;
+		double timingCyclePercentage;
 } TAnalogThreadData;
 
 typedef enum
@@ -137,7 +144,8 @@ static TAnalogThreadData AnalogThreadData[3] =
 {
 	{
 		.semaphore = NULL,
-		.channelNb = 0 },
+		.channelNb = 0,
+	},
 	{
 		.semaphore = NULL,
 		.channelNb = 1 },
@@ -152,46 +160,48 @@ static volatile uint16union_t *NvTowerMode; /*!< The non-volatile Tower Mode. */
 static volatile uint8_t *NvInverseMode; /*!< The non-volatile Inverse Mode. */
 static volatile uint16union_t *NvTimesTripped; /*!< The non-volatile number of times tripped. */
 
+
+
 uint8_t LastFaultType;
 uint8_t LastCurrent[3];
 
-bool TimingStarted = false;
-bool TimingActive = false;
-
 uint32_t TimingCounter[NB_ANALOG_CHANNELS];
+bool ChannelTimingActive[NB_ANALOG_CHANNELS];
+bool TripActive;
+bool TimingActive;
 
 /* Semaphores */
 static OS_ECB* IRMSSemaphore;
 
 
 
-static void IRMSGet(int16_t * samples, double * const dataPtr)
-{
-	OS_SemaphoreWait(IRMSSemaphore, 0);
-
-	// Initialise variables for vrms calculation
-	double sum = 0;
-	double average = 0;
-	double vrms = 0;
-
-	// Calculate sum of squares
-	int j = sizeof(samples);
-
-	for (int i = 0; i < sizeof(samples); i++)
-	{
-		sum = sum + ((double)samples[i] * (double)samples[i]);
-	}
-
-	// Calculate average
-	average = (sum / sizeof(samples));
-	vrms = sqrt(average);
-
-	// Vrms --> Irms
-	// 0.350mV ~ 1
-	*dataPtr = vrms / 0.35;
-
-	OS_SemaphoreSignal(IRMSSemaphore);
-}
+//static void IRMSGet(int16_t * samples, double * const dataPtr)
+//{
+//	OS_SemaphoreWait(IRMSSemaphore, 0);
+//
+//	// Initialise variables for vrms calculation
+//	double sum = 0;
+//	double average = 0;
+//	double vrms = 0;
+//
+//	// Calculate sum of squares
+//	int j = sizeof(samples);
+//
+//	for (int i = 0; i < sizeof(samples); i++)
+//	{
+//		sum = sum + ((double)samples[i] * (double)samples[i]);
+//	}
+//
+//	// Calculate average
+//	average = (sum / sizeof(samples));
+//	vrms = sqrt(average);
+//
+//	// Vrms --> Irms
+//	// 0.350mV ~ 1
+//	*dataPtr = vrms / 0.35;
+//
+//	OS_SemaphoreSignal(IRMSSemaphore);
+//}
 
 
 /*
@@ -451,18 +461,18 @@ static void TimingModuleThread(void* pData)
 	for (;;)
 	{
 		OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-		//    for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
-		//    {
-		//	  if (TimingCounter[analogNb] > 0)
-		//	  {
-		//		TimingCounter[analogNb]--;
-		//		if (TimingCounter[analogNb] == 0)
-		//		{
-		//		  Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
-		//		  Flash_Write16((uint16_t *)NvTowerNb, (NvTimesTripped->l + 1));
-		//		}
-		//	  }
-		//    }
+		for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
+		{
+			if (TimingCounter[analogNb] > 0)
+			{
+				TimingCounter[analogNb]--;
+				if (TimingCounter[analogNb] == 0)
+				{
+					Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
+					Flash_Write16((uint16_t *) NvTowerNb, (NvTimesTripped->l + 1));
+				}
+			}
+		}
 	}
 }
 
@@ -471,28 +481,11 @@ void AnalogLoopbackThread(void* pData)
 	// Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
 
-	// Array of array of samples for each analog channel
-	int16_t analogInputValue[NB_ANALOG_CHANNELS][NB_SAMPLES];
-
-	// Array of sampleCount for each analog channel
-	uint8_t sampleCount[NB_ANALOG_CHANNELS];
-
-	// Initialise sampleCount to 0
-	sampleCount[analogData->channelNb] = 0;
-
-	// An array of previous total time for each analog channel
-	uint32_t previousTotalTime[NB_ANALOG_CHANNELS];
-
-	// An array of timing Cycle Percentage for each analog channel
-	double timingCyclePercentage[NB_ANALOG_CHANNELS];
+	// Initialise sample count to 0
+	analogData->sampleCount = 0;
 
 	// Initialise timing cycle percentage to 0
-	timingCyclePercentage[analogData->channelNb] = 0;
-
-	double sum[NB_ANALOG_CHANNELS];
-	double average[NB_ANALOG_CHANNELS];
-	double vrms[NB_ANALOG_CHANNELS];
-	double irms[NB_ANALOG_CHANNELS];
+	analogData->timingCyclePercentage = 0;
 
 	for (;;)
 	{
@@ -500,18 +493,18 @@ void AnalogLoopbackThread(void* pData)
 		// Wait for semaphore
 		(void) OS_SemaphoreWait(analogData->semaphore, 0);
 
-		// Get analog sample into array
-		//Analog_Get(analogData->channelNb, &analogInputValue[analogData->channelNb][sampleCount[analogData->channelNb]]);
-		Analog_Get(analogData->channelNb, analogData->dataPtr++);
+		// Get analog sample
+		Analog_Get(analogData->channelNb, analogData->dataPtr);
 
-		analogData->ptrPos++;
-		if (analogData->ptrPos == NB_SAMPLES)
-		{
-			analogData->dataPtr = &analogData->analogInputValues[0];
-			analogData->ptrPos = 0;
-		}
+		// Increment sample count
+		analogData->sampleCount++;
 
-		// TODO FIX IT SHOULD NOT BE DOING THIS IF IT ALREADY TRIPPED
+		// Reset sample count and data pointer if sampleCount reached max number of sample count
+		if (analogData->sampleCount == NB_SAMPLES)
+			analogData->sampleCount = 0;
+		analogData->dataPtr = &analogData->analogInputValues[analogData->sampleCount];
+
+
 		// If timer is not running
 		if (TimingCounter[analogData->channelNb] == 0)
 		{
@@ -519,65 +512,83 @@ void AnalogLoopbackThread(void* pData)
 			TimingCounter[analogData->channelNb] = 10000;
 
 			// Set previous total time to 10 seconds
-			previousTotalTime[analogData->channelNb] = 10000;
+			analogData->previousTotalTime = 10000;
 		}
 
-		// Increment sample Count
-		sampleCount[analogData->channelNb]++;
-
-		// If collected 16 samples reset sample count to 0
-		if (sampleCount[analogData->channelNb] == NB_SAMPLES)
-			sampleCount[analogData->channelNb] = 0;
-
-
-		sum[analogData->channelNb] = 0;
-
+		analogData->sum = 0;
 		// Calculate sum of squares
 		for (int i = 0; i < NB_SAMPLES; i++)
-			sum[analogData->channelNb] = sum[analogData->channelNb] + (double)((analogInputValue[analogData->channelNb][i]) * (analogInputValue[analogData->channelNb][i]));
+			analogData->sum = analogData->sum +  (double)(analogData->analogInputValues[i] * analogData->analogInputValues[i]);
+
 
 		// Calculate average
-		average[analogData->channelNb] = (sum[analogData->channelNb] / (double)NB_SAMPLES);
-		vrms[analogData->channelNb] = sqrt(average[analogData->channelNb]);
+		analogData->average = (analogData->sum / (double)NB_SAMPLES);
 
-		// Vrms --> Irms | 0.350V --> 1
-		irms[analogData->channelNb] = vrms[analogData->channelNb] / 0.35;
+		// Calculate the vrms / square root of average
+		analogData->vrms = sqrt(analogData->average);
 
-		//double irms;
+		// Calculate irms [irms = vrms * 0.35]
+		analogData->irms = analogData->vrms * 0.35;
 
-		//irms = 1000;
-		//IRMSGet(analogInputValue[analogData->channelNb][analogData->channelNb], &irms);
+		/* 1.03 Irms is the current used to activate the trip 20Vpp
+		 * 1.03Irms = ((65536 / 20) * 1.03) * 0.35
+		 * 1.03Irms = 1181.2864
+		 */
 
-
-		//		/* 1.03 Irms is the current used to activate the trip
-		//		 * When V = 10pp
-		//		 * 1.03Irms = 65534 / 10 * 1.03
-		//		 * 1.03Irms = 6750.002
-		//3375.104 ?
-		//		 */
-
-
-		if (irms[analogData->channelNb] < (double)6750.414)
+		if (analogData->irms < (double)1181.2864)
 		{
-			TimingCounter[analogData->channelNb] = 0;
-			Analog_Put(TIMING_CHANNEL, DOR_IDLE);
-			Analog_Put(TRIP_CHANNEL, DOR_IDLE);
+			// Set channel timing to be false for specific channel number
+			ChannelTimingActive[analogData->channelNb] = false;
+
+			// Initialise bool noTimingActive
+			bool noTimingActive = true;
+
+			// For each analog thread, check if no timing is active is active
+			for (int i =0; i < NB_ANALOG_CHANNELS; i++)
+			{
+				noTimingActive &= !ChannelTimingActive[i];
+			}
+
+			// Idle Trip and timming channel if no timing
+			if (noTimingActive && TimingActive)
+			{
+				Analog_Put(TIMING_CHANNEL, DOR_IDLE);
+				Analog_Put(TRIP_CHANNEL, DOR_IDLE);
+				TimingActive = false;
+			}
 		} else
 		{
-			 //time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
+			// Set channel timing to be true for specific channel number
+			ChannelTimingActive[analogData->channelNb] = true;
 
-			Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
-			uint32_t time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(irms[analogData->channelNb], Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
+			// Initialise bool atLeastOneTimingActive
+			bool atLeastOneTimingActive = false;
 
-			uint32_t timeLeft = TimingCounter[analogData->channelNb];
+			// For each analog channel check if timing is active
+			for (int i = 0; i < NB_ANALOG_CHANNELS; i++)
+				atLeastOneTimingActive |= ChannelTimingActive[i];
 
-			timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft / previousTotalTime[analogData->channelNb]);
-			time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
-			previousTotalTime[analogData->channelNb] = time;
+			// if at least one timing is active then trip timing channel
+			if (atLeastOneTimingActive && !TimingActive)
+			{
+				Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
+				TimingActive = true;
+			}
 
-			if (time < 1)
-				time = 1;
-			TimingCounter[analogData->channelNb] = (uint32_t)time;
+			// TODO Fix Timing
+			// Calculate delay time
+			// time = (k / ((Irms^a) - 1) * 1000) This is in Seconds so we need to change it into milliseconds by multiplying 1000
+			analogData->time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(analogData->irms, Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
+
+			//
+			analogData->timeLeft = TimingCounter[analogData->channelNb];
+			analogData->timingCyclePercentage = analogData->timingCyclePercentage + (analogData->timeLeft / analogData->previousTotalTime);
+			analogData->time = analogData->timeLeft * (1 - analogData->timingCyclePercentage);
+			analogData->previousTotalTime = analogData->time;
+
+			if (analogData->time < 1)
+				analogData->time = 1;
+			TimingCounter[analogData->channelNb] = analogData->time;
 		}
 	}
 }
