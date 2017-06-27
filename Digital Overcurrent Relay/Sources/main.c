@@ -43,7 +43,7 @@
 #include "analog.h"
 
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
-#define NB_ANALOG_CHANNELS 3
+#define NB_ANALOG_CHANNELS 2
 #define NB_SAMPLES 16
 
 #define BAUD_RATE (uint32_t)115200	// BaudRate
@@ -87,6 +87,10 @@ typedef struct AnalogThreadData
 {
 		OS_ECB* semaphore;
 		uint8_t channelNb;
+		int16_t analogInputValues[NB_SAMPLES];
+		int16_t *dataPtr;
+		uint8_t ptrPos;
+		uint32_t previousTotalTime;
 } TAnalogThreadData;
 
 typedef enum
@@ -467,9 +471,6 @@ void AnalogLoopbackThread(void* pData)
 	// Make the code easier to read by giving a name to the typecast'ed pointer
   #define analogData ((TAnalogThreadData*)pData)
 
-	// Number of samples to take
-	//static const uint8_t NB_SAMPLES = 16;
-
 	// Array of array of samples for each analog channel
 	int16_t analogInputValue[NB_ANALOG_CHANNELS][NB_SAMPLES];
 
@@ -488,6 +489,11 @@ void AnalogLoopbackThread(void* pData)
 	// Initialise timing cycle percentage to 0
 	timingCyclePercentage[analogData->channelNb] = 0;
 
+	double sum[NB_ANALOG_CHANNELS];
+	double average[NB_ANALOG_CHANNELS];
+	double vrms[NB_ANALOG_CHANNELS];
+	double irms[NB_ANALOG_CHANNELS];
+
 	for (;;)
 	{
 
@@ -495,15 +501,16 @@ void AnalogLoopbackThread(void* pData)
 		(void) OS_SemaphoreWait(analogData->semaphore, 0);
 
 		// Get analog sample into array
+		//Analog_Get(analogData->channelNb, &analogInputValue[analogData->channelNb][sampleCount[analogData->channelNb]]);
+		Analog_Get(analogData->channelNb, analogData->dataPtr++);
 
+		analogData->ptrPos++;
+		if (analogData->ptrPos == NB_SAMPLES)
+		{
+			analogData->dataPtr = &analogData->analogInputValues[0];
+			analogData->ptrPos = 0;
+		}
 
-		uint8_t testVar = sampleCount[analogData->channelNb];
-
-		int16_t *testVar3 = &analogInputValue[analogData->channelNb][testVar];
-		Analog_Get(analogData->channelNb, testVar3);
-//		Analog_Get(analogData->channelNb, analogInputValue[analogData->channelNb][testVar]);
-
-		int16_t testVar2 = analogInputValue[analogData->channelNb][testVar];
 		// TODO FIX IT SHOULD NOT BE DOING THIS IF IT ALREADY TRIPPED
 		// If timer is not running
 		if (TimingCounter[analogData->channelNb] == 0)
@@ -523,24 +530,18 @@ void AnalogLoopbackThread(void* pData)
 			sampleCount[analogData->channelNb] = 0;
 
 
-//		// Initialise variables for vrms calculation
-
-		double sum = 0;
-		double average = 0;
-		double vrms = 0;
+		sum[analogData->channelNb] = 0;
 
 		// Calculate sum of squares
 		for (int i = 0; i < NB_SAMPLES; i++)
-		{
-			sum = sum + ((double)(analogInputValue[analogData->channelNb][i]) * (double)(analogInputValue[analogData->channelNb][i]));
-		}
+			sum[analogData->channelNb] = sum[analogData->channelNb] + (double)((analogInputValue[analogData->channelNb][i]) * (analogInputValue[analogData->channelNb][i]));
 
 		// Calculate average
-		average = (sum / (double)NB_SAMPLES);
-		vrms = sqrt(average);
-		// Vrms --> Irms
-		// 0.350mV ~ 1
-		double irms = vrms / 0.35;
+		average[analogData->channelNb] = (sum[analogData->channelNb] / (double)NB_SAMPLES);
+		vrms[analogData->channelNb] = sqrt(average[analogData->channelNb]);
+
+		// Vrms --> Irms | 0.350V --> 1
+		irms[analogData->channelNb] = vrms[analogData->channelNb] / 0.35;
 
 		//double irms;
 
@@ -552,36 +553,31 @@ void AnalogLoopbackThread(void* pData)
 		//		 * When V = 10pp
 		//		 * 1.03Irms = 65534 / 10 * 1.03
 		//		 * 1.03Irms = 6750.002
+		//3375.104 ?
 		//		 */
 
 
-		if (irms < 6750.002)
+		if (irms[analogData->channelNb] < (double)6750.414)
 		{
 			TimingCounter[analogData->channelNb] = 0;
 			Analog_Put(TIMING_CHANNEL, DOR_IDLE);
 			Analog_Put(TRIP_CHANNEL, DOR_IDLE);
-
 		} else
 		{
 			 //time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
 
+			Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
+			uint32_t time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(irms[analogData->channelNb], Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
 
-//			Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
-//			uint32_t time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(irms, Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
-//
-//			uint32_t timeLeft = TimingCounter[analogData->channelNb];
-//
-//			timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft / previousTotalTime[analogData->channelNb]);
-//			time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
-//			previousTotalTime[analogData->channelNb] = time;
-//
-//
-//
-//			if (time < 1)
-//				time = 1;
-//			TimingCounter[analogData->channelNb] = (uint32_t)time;
+			uint32_t timeLeft = TimingCounter[analogData->channelNb];
 
+			timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft / previousTotalTime[analogData->channelNb]);
+			time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
+			previousTotalTime[analogData->channelNb] = time;
 
+			if (time < 1)
+				time = 1;
+			TimingCounter[analogData->channelNb] = (uint32_t)time;
 		}
 	}
 }
