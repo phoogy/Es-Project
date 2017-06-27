@@ -43,7 +43,7 @@
 #include "analog.h"
 
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
-#define NB_ANALOG_CHANNELS 2
+#define NB_ANALOG_CHANNELS 3
 #define NB_SAMPLES 16
 
 #define BAUD_RATE (uint32_t)115200	// BaudRate
@@ -64,7 +64,11 @@
 #define CMD_TIME 0x0C			//Time command in hex
 #define CMD_ACCEL 0x10			//Accelerometer command in hex
 #define CMD_PROTOCOL_MODE 0x0A		//Protocol Mode command in hex
-#define CMD_DOR 0x0E
+#define CMD_INVERSE_MODE 0x0E
+#define CMD_CURRENT 0x0F
+#define CMD_FREQUENCY 0x010
+#define CMD_TRIP_COUNT 0x11
+#define CMD_LAST_FAULT 0x12
 
 /* Thread stacks */
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
@@ -74,9 +78,9 @@ static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((align
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 const uint8_t ANALOG_THREAD_PRIORITIES[3] = {
-		4,
-		5,
-		6 };
+		1,
+		2,
+		3 };
 
 /* Declared functions */
 
@@ -173,37 +177,6 @@ bool TimingActive;
 
 /* Semaphores */
 static OS_ECB* IRMSSemaphore;
-
-
-
-//static void IRMSGet(int16_t * samples, double * const dataPtr)
-//{
-//	OS_SemaphoreWait(IRMSSemaphore, 0);
-//
-//	// Initialise variables for vrms calculation
-//	double sum = 0;
-//	double average = 0;
-//	double vrms = 0;
-//
-//	// Calculate sum of squares
-//	int j = sizeof(samples);
-//
-//	for (int i = 0; i < sizeof(samples); i++)
-//	{
-//		sum = sum + ((double)samples[i] * (double)samples[i]);
-//	}
-//
-//	// Calculate average
-//	average = (sum / sizeof(samples));
-//	vrms = sqrt(average);
-//
-//	// Vrms --> Irms
-//	// 0.350mV ~ 1
-//	*dataPtr = vrms / 0.35;
-//
-//	OS_SemaphoreSignal(IRMSSemaphore);
-//}
-
 
 /*
  * @brief Sends or Sets the Tower Number.
@@ -326,10 +299,14 @@ static bool DOR(void)
 				//packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, ,0);
 				break;
 			case 2:
+							// send number of times tripped
+							packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, NvTimesTripped->s.Hi, NvTimesTripped->s.Lo);
+							break;
+			case 3:
 				// send number of times tripped
 				packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, NvTimesTripped->s.Hi, NvTimesTripped->s.Lo);
 				break;
-			case 3:
+			case 4:
 				// TODO type of last fault detected
 				packetFlag = Packet_Put(CMD_DOR, Packet_Parameter2, 0, 0);
 				break;
@@ -462,24 +439,22 @@ static void TimingModuleThread(void* pData)
 	for (;;)
 	{
 		OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-		if (!TripActive)
+
+		for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
 		{
-			for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
+			if (TimingCounter[analogNb] > 0)
 			{
-				if (TimingCounter[analogNb] > 0)
+				TimingCounter[analogNb]--;
+				if (TimingCounter[analogNb] == 0)
 				{
-					TimingCounter[analogNb]--;
-					if (TimingCounter[analogNb] == 0)
-					{
+					if (!TripActive)
 						Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
-						TripActive = true;
-						Flash_Write16((uint16_t *) NvTowerNb, (NvTimesTripped->l + 1));
-						for (uint8_t analogNb2 = 0; analogNb2 < NB_ANALOG_CHANNELS; analogNb2++)
-							TimingCounter[analogNb2] = 0;
-					}
+					TripActive = true;
+					Flash_Write16((uint16_t *) NvTimesTripped, (NvTimesTripped->l + 1));
 				}
 			}
 		}
+
 	}
 }
 
@@ -494,6 +469,11 @@ void AnalogLoopbackThread(void* pData)
 	// Initialise timing cycle percentage to 0
 	analogData->timingCyclePercentage = 0;
 
+	const int16_t SineWave[16] = {
+			0, 12539, 23170, 30273, 32767, 30273, 23170, 12539,
+			0, -12539, -23170, -30273, -32767, -30273, -23170, -12539
+	};
+
 	for (;;)
 	{
 
@@ -502,6 +482,10 @@ void AnalogLoopbackThread(void* pData)
 
 		// Get analog sample
 		Analog_Get(analogData->channelNb, analogData->dataPtr);
+
+		//analogData->analogInputValues[analogData->sampleCount] = SineWave[analogData->sampleCount];
+
+
 
 		// Increment sample count
 		analogData->sampleCount++;
@@ -515,11 +499,11 @@ void AnalogLoopbackThread(void* pData)
 		// If timer is not running
 		if (TimingCounter[analogData->channelNb] == 0)
 		{
-			// Set Timing Counter to high number 10 seconds
-			TimingCounter[analogData->channelNb] = 10000;
+			// Set Timing Counter to high number 100 seconds
+			TimingCounter[analogData->channelNb] = 100000;
 
 			// Set previous total time to 10 seconds
-			analogData->previousTotalTime = 10000;
+			analogData->previousTotalTime = 100000;
 		}
 
 		analogData->sum = 0;
@@ -534,8 +518,8 @@ void AnalogLoopbackThread(void* pData)
 		// Calculate the vrms / square root of average
 		analogData->vrmsd = sqrt(analogData->average);
 
-		// Calculate irms [irms = vrms * 0.35]
-		analogData->irmsd = analogData->vrmsd * 0.35;
+		// Calculate irms [irms = vrms / 0.35]
+		analogData->irmsd = analogData->vrmsd / 0.35;
 
 		/* 1.03 Irms is the current used to activate the trip 20Vpp
 		 * 1.03Irms = ((65536 / 20) * 1.03)
@@ -604,7 +588,6 @@ void AnalogLoopbackThread(void* pData)
 			if (!TripActive)
 			{
 				// Calculate time
-				//analogData->timeCounter = (uint32_t)((Characteristic[*NvInverseMode].k / (pow(analogData->irmsa, Characteristic[*NvInverseMode].a)) - 1) * 1000);
 				// Time(ms) = (k / ((Irms^a) - 1) * 1000)
 				analogData->timeCounter = (pow(analogData->irmsa, Characteristic[*NvInverseMode].a));
 				analogData->timeCounter -= 1;
@@ -613,6 +596,13 @@ void AnalogLoopbackThread(void* pData)
 
 				// Get time left in miliseconds
 				analogData->timeLeft = (double)(TimingCounter[analogData->channelNb]);
+
+				if (analogData->previousTotalTime == 100000)
+				{
+					analogData->previousTotalTime = analogData->timeCounter;
+					analogData->timeLeft = analogData->timeCounter - (100000 - analogData->timeLeft);
+					analogData->timingCyclePercentage = 0;
+				}
 
 				// Calculate timing cycle percentage
 				analogData->timingCyclePercentage = analogData->timingCyclePercentage + ( 1 - (analogData->timeLeft / analogData->previousTotalTime));
@@ -663,20 +653,7 @@ int main(void)
 													&InitModulesThreadStack[THREAD_STACK_SIZE - 1],
 													0); // Highest priority
 
-	error = OS_ThreadCreate(PacketModuleThread,
-														NULL,
-														&PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
-														1);
 
-	error = OS_ThreadCreate(PITModuleThread,
-														NULL,
-														&PITModuleThreadStack[THREAD_STACK_SIZE - 1],
-														2);
-
-	error = OS_ThreadCreate(TimingModuleThread,
-														NULL,
-														&TimingModuleThreadStack[THREAD_STACK_SIZE - 1],
-														3);
 
 
 	for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
@@ -686,6 +663,21 @@ int main(void)
 														&AnalogThreadStacks[threadNb][THREAD_STACK_SIZE - 1],
 														ANALOG_THREAD_PRIORITIES[threadNb]);
 	}
+
+	error = OS_ThreadCreate(PacketModuleThread,
+														NULL,
+														&PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
+														4);
+
+	error = OS_ThreadCreate(PITModuleThread,
+														NULL,
+														&PITModuleThreadStack[THREAD_STACK_SIZE - 1],
+														5);
+
+	error = OS_ThreadCreate(TimingModuleThread,
+														NULL,
+														&TimingModuleThreadStack[THREAD_STACK_SIZE - 1],
+														6);
 
 
 	OS_Start();
