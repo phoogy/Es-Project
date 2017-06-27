@@ -489,7 +489,7 @@ void AnalogLoopbackThread(void* pData)
 
 	// Initialise timing cycle percentage to 0
 	analogData->timingCyclePercentage = 0;
-
+// test data
 	const int16_t SineWave[16] = {
 			0, 12539, 23170, 30273, 32767, 30273, 23170, 12539,
 			0, -12539, -23170, -30273, -32767, -30273, -23170, -12539
@@ -504,7 +504,7 @@ void AnalogLoopbackThread(void* pData)
 		// Get analog sample
 		Analog_Get(analogData->channelNb, analogData->dataPtr);
 
-		//analogData->analogInputValues[analogData->sampleCount] = SineWave[analogData->sampleCount];
+		//analogData->analogInputValues[analogData->sampleCount] = SineWave[analogData->sampleCount];	// test data
 
 		// Increment sample count
 		analogData->sampleCount++;
@@ -604,13 +604,13 @@ void AnalogLoopbackThread(void* pData)
 			{
 				// Calculate time
 				// Time(ms) = (k / ((Irms^a) - 1) * 1000)
-				//analogData->timeCounter = ((Characteristic[*NvInverseMode].k / ((pow(analogData->irmsa, Characteristic[*NvInverseMode].a)) -1)) * 1000)
+				//analogData->timeCounter = ((Characteristic[*NvInverseMode].k / ((pow(analogData->irmsa, Characteristic[*NvInverseMode].a)) -1)) * 1000)   // Not working
 				analogData->timeCounter = (pow(analogData->irmsa, Characteristic[*NvInverseMode].a));
 				analogData->timeCounter -= 1;
 				analogData->timeCounter = Characteristic[*NvInverseMode].k / analogData->timeCounter;
 				analogData->timeCounter *= 1000;
 
-				//analogData->timeCounter = 100000;
+				//analogData->timeCounter = 100000;		// test data
 
 				// Get time left in miliseconds
 				analogData->timeLeft = (double)(TimingCounter[analogData->channelNb]);
