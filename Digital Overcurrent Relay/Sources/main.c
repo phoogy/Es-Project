@@ -90,13 +90,14 @@ typedef struct AnalogThreadData
 		int16_t analogInputValues[NB_SAMPLES];
 		int16_t *dataPtr;
 		uint8_t sampleCount;
-		uint32_t previousTotalTime;
+		double previousTotalTime;
 		double sum;
 		double average;
-		double vrms;
-		double irms;
-		uint32_t time;
-		uint32_t timeLeft;
+		double vrmsd;
+		double irmsd;
+		double irmsa;
+		double timeCounter;
+		double timeLeft;
 		double timingCyclePercentage;
 } TAnalogThreadData;
 
@@ -461,15 +462,19 @@ static void TimingModuleThread(void* pData)
 	for (;;)
 	{
 		OS_SemaphoreWait(PITReady[TIMING_CLOCK], 0);
-		for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
+		if (!TripActive)
 		{
-			if (TimingCounter[analogNb] > 0)
+			for (uint8_t analogNb = 0; analogNb < NB_ANALOG_CHANNELS; analogNb++)
 			{
-				TimingCounter[analogNb]--;
-				if (TimingCounter[analogNb] == 0)
+				if (TimingCounter[analogNb] > 0)
 				{
-					Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
-					Flash_Write16((uint16_t *) NvTowerNb, (NvTimesTripped->l + 1));
+					TimingCounter[analogNb]--;
+					if (TimingCounter[analogNb] == 0)
+					{
+						Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
+						TripActive = true;
+						Flash_Write16((uint16_t *) NvTowerNb, (NvTimesTripped->l + 1));
+					}
 				}
 			}
 		}
@@ -525,21 +530,24 @@ void AnalogLoopbackThread(void* pData)
 		analogData->average = (analogData->sum / (double)NB_SAMPLES);
 
 		// Calculate the vrms / square root of average
-		analogData->vrms = sqrt(analogData->average);
+		analogData->vrmsd = sqrt(analogData->average);
 
 		// Calculate irms [irms = vrms * 0.35]
-		analogData->irms = analogData->vrms * 0.35;
+		analogData->irmsd = analogData->vrmsd * 0.35;
 
 		/* 1.03 Irms is the current used to activate the trip 20Vpp
-		 * 1.03Irms = ((65536 / 20) * 1.03) * 0.35
-		 * 1.03Irms = 1181.2864
+		 * 1.03Irms = ((65536 / 20) * 1.03)
+		 * 1.03Irms = 3375.104
 		 */
 
-		if (analogData->irms < (double)1181.2864)
+		// convert 16bit to actual current value
+		analogData->irmsa = ((analogData->irmsd/32767)*10);
+
+		if (analogData->irmsa < 1.03)
 		{
 			// Set channel timing to be false for specific channel number
 			ChannelTimingActive[analogData->channelNb] = false;
-
+			TimingCounter[analogData->channelNb] = 0;
 			// Initialise bool noTimingActive
 			bool noTimingActive = true;
 
@@ -555,6 +563,7 @@ void AnalogLoopbackThread(void* pData)
 				Analog_Put(TIMING_CHANNEL, DOR_IDLE);
 				Analog_Put(TRIP_CHANNEL, DOR_IDLE);
 				TimingActive = false;
+				analogData->timingCyclePercentage = 0;
 			}
 		} else
 		{
@@ -578,17 +587,39 @@ void AnalogLoopbackThread(void* pData)
 			// TODO Fix Timing
 			// Calculate delay time
 			// time = (k / ((Irms^a) - 1) * 1000) This is in Seconds so we need to change it into milliseconds by multiplying 1000
-			analogData->time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(analogData->irms, Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
 
-			//
-			analogData->timeLeft = TimingCounter[analogData->channelNb];
-			analogData->timingCyclePercentage = analogData->timingCyclePercentage + (analogData->timeLeft / analogData->previousTotalTime);
-			analogData->time = analogData->timeLeft * (1 - analogData->timingCyclePercentage);
-			analogData->previousTotalTime = analogData->time;
 
-			if (analogData->time < 1)
-				analogData->time = 1;
-			TimingCounter[analogData->channelNb] = analogData->time;
+
+			if (!TripActive)
+			{
+				// Calculate time
+				//analogData->timeCounter = (uint32_t)((Characteristic[*NvInverseMode].k / (pow(analogData->irmsa, Characteristic[*NvInverseMode].a)) - 1) * 1000);
+				// Time(ms) = (k / ((Irms^a) - 1) * 1000)
+				analogData->timeCounter = (pow(analogData->irmsa, Characteristic[*NvInverseMode].a));
+				analogData->timeCounter -= 1;
+				analogData->timeCounter = Characteristic[*NvInverseMode].k / analogData->timeCounter;
+				analogData->timeCounter *= 1000;
+
+				// Get time left in miliseconds
+				analogData->timeLeft = (double)(TimingCounter[analogData->channelNb]);
+
+				// Calculate timing cycle percentage
+				analogData->timingCyclePercentage = analogData->timingCyclePercentage + ( 1 - (analogData->timeLeft / analogData->previousTotalTime));
+
+				// Set new previous time
+				//analogData->previousTotalTime = analogData->timeCounter;
+
+				// Calculate time required
+				analogData->timeCounter = analogData->timeCounter * (1 - analogData->timingCyclePercentage);
+
+				//
+				analogData->previousTotalTime = analogData->timeCounter;
+
+				//
+				if (analogData->timeCounter < 1)
+					analogData->timeCounter = 1;
+				TimingCounter[analogData->channelNb] = (uint32_t)(analogData->timeCounter);
+			}
 		}
 	}
 }
