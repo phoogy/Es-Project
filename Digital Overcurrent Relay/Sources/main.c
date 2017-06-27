@@ -44,6 +44,8 @@
 
 #define THREAD_STACK_SIZE 100		// Arbitrary thread stack size - big enough for stacking of interrupts and OS use.
 #define NB_ANALOG_CHANNELS 3
+#define NB_SAMPLES 16
+
 #define BAUD_RATE (uint32_t)115200	// BaudRate
 #define DEFAULT_TOWER_NUMBER 6681	// Last four digits of student number to be used as tower number
 #define SAMPLING_CLOCK 0
@@ -63,7 +65,7 @@
 #define CMD_ACCEL 0x10			//Accelerometer command in hex
 #define CMD_PROTOCOL_MODE 0x0A		//Protocol Mode command in hex
 #define CMD_DOR 0x0E
-
+//gfhfdghgf
 /* Thread stacks */
 OS_THREAD_STACK(InitModulesThreadStack, THREAD_STACK_SIZE); /*!< The stack for the Init thread. */
 static uint32_t PacketModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
@@ -72,9 +74,9 @@ static uint32_t TimingModuleThreadStack[THREAD_STACK_SIZE] __attribute__ ((align
 static uint32_t AnalogThreadStacks[NB_ANALOG_CHANNELS][THREAD_STACK_SIZE] __attribute__ ((aligned(0x08)));
 
 const uint8_t ANALOG_THREAD_PRIORITIES[3] = {
-		1,
-		2,
-		3 };
+		4,
+		5,
+		6 };
 
 /* Declared functions */
 
@@ -152,19 +154,19 @@ uint8_t LastCurrent[3];
 bool TimingStarted = false;
 bool TimingActive = false;
 
-uint32_t TimingCounter[3];
+uint32_t TimingCounter[NB_ANALOG_CHANNELS];
 
 /* Semaphores */
 static OS_ECB* IRMSSemaphore;
 
 
 
-static void IRMSGet(int16_t * const samples, double * const dataPtr)
+static void IRMSGet(int16_t * samples, double * const dataPtr)
 {
 	OS_SemaphoreWait(IRMSSemaphore, 0);
 
 	// Initialise variables for vrms calculation
-	int32_t sum = 0;
+	double sum = 0;
 	double average = 0;
 	double vrms = 0;
 
@@ -173,7 +175,7 @@ static void IRMSGet(int16_t * const samples, double * const dataPtr)
 
 	for (int i = 0; i < sizeof(samples); i++)
 	{
-		sum = sum + (samples[i] * samples[i]);
+		sum = sum + ((double)samples[i] * (double)samples[i]);
 	}
 
 	// Calculate average
@@ -412,7 +414,7 @@ static void InitModulesThread(void* pData)
 	///* If no valid Inverse mode is set then set to default INVERSE*/
 
 	PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
-	PIT_Set(TIMING_CLOCK, 1000000, true);
+	//PIT_Set(TIMING_CLOCK, 1000000, true);
 
 	// Analog
 	(void) Analog_Init(CPU_BUS_CLK_HZ);
@@ -466,10 +468,10 @@ void AnalogLoopbackThread(void* pData)
   #define analogData ((TAnalogThreadData*)pData)
 
 	// Number of samples to take
-	static const uint8_t nbSamples = 16;
+	//static const uint8_t NB_SAMPLES = 16;
 
 	// Array of array of samples for each analog channel
-	int16_t analogInputValue[NB_ANALOG_CHANNELS][nbSamples];
+	int16_t analogInputValue[NB_ANALOG_CHANNELS][NB_SAMPLES];
 
 	// Array of sampleCount for each analog channel
 	uint8_t sampleCount[NB_ANALOG_CHANNELS];
@@ -493,8 +495,15 @@ void AnalogLoopbackThread(void* pData)
 		(void) OS_SemaphoreWait(analogData->semaphore, 0);
 
 		// Get analog sample into array
-		Analog_Get(analogData->channelNb, &analogInputValue[analogData->channelNb][sampleCount[analogData->channelNb]]);
 
+
+		uint8_t testVar = sampleCount[analogData->channelNb];
+
+		int16_t *testVar3 = &analogInputValue[analogData->channelNb][testVar];
+		Analog_Get(analogData->channelNb, testVar3);
+//		Analog_Get(analogData->channelNb, analogInputValue[analogData->channelNb][testVar]);
+
+		int16_t testVar2 = analogInputValue[analogData->channelNb][testVar];
 		// TODO FIX IT SHOULD NOT BE DOING THIS IF IT ALREADY TRIPPED
 		// If timer is not running
 		if (TimingCounter[analogData->channelNb] == 0)
@@ -510,40 +519,42 @@ void AnalogLoopbackThread(void* pData)
 		sampleCount[analogData->channelNb]++;
 
 		// If collected 16 samples reset sample count to 0
-		if (sampleCount[analogData->channelNb] == nbSamples)
+		if (sampleCount[analogData->channelNb] == NB_SAMPLES)
 			sampleCount[analogData->channelNb] = 0;
 
 
-
-
 //		// Initialise variables for vrms calculation
-//		int32_t sum = 0;
-//		double average = 0;
-//		double vrms = 0;
-//
-//		// Calculate sum of squares
-//		for (int i = 0; i < nbSamples; i++)
-//		{
-//			sum = sum + (analogInputValue[analogData->channelNb][i] * analogInputValue[analogData->channelNb][i]);
-//		}
-//
-//		// Calculate average
-//		average = (sum / nbSamples);
-//		vrms = sqrt(average);
-//		// Vrms --> Irms
-//		// 0.350mV ~ 1
-//		double irms = vrms / 0.35;
-//
 
-		double irms;
+		double sum = 0;
+		double average = 0;
+		double vrms = 0;
 
-		IRMSGet(analogInputValue[analogData->channelNb], &irms);
+		// Calculate sum of squares
+		for (int i = 0; i < NB_SAMPLES; i++)
+		{
+			sum = sum + ((double)(analogInputValue[analogData->channelNb][i]) * (double)(analogInputValue[analogData->channelNb][i]));
+		}
+
+		// Calculate average
+		average = (sum / (double)NB_SAMPLES);
+		vrms = sqrt(average);
+		// Vrms --> Irms
+		// 0.350mV ~ 1
+		double irms = vrms / 0.35;
+
+		//double irms;
+
+		//irms = 1000;
+		//IRMSGet(analogInputValue[analogData->channelNb][analogData->channelNb], &irms);
+
 
 		//		/* 1.03 Irms is the current used to activate the trip
 		//		 * When V = 10pp
 		//		 * 1.03Irms = 65534 / 10 * 1.03
 		//		 * 1.03Irms = 6750.002
 		//		 */
+
+
 		if (irms < 6750.002)
 		{
 			TimingCounter[analogData->channelNb] = 0;
@@ -552,21 +563,25 @@ void AnalogLoopbackThread(void* pData)
 
 		} else
 		{
-			// time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
-			// time = time * 1000000000
+			 //time = k / ((Irms^2)-1) This is in Seconds so we need to change it into milliseconds
 
 
-			uint32_t time = (Characteristic[*NvInverseMode].k / (pow(irms, Characteristic[*NvInverseMode].a) - 1)) * 1000;
+//			Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
+//			uint32_t time = (Characteristic[*NvInverseMode].k / (uint32_t)((pow(irms, Characteristic[*NvInverseMode].a) - 1)) * (double)1000);
+//
+//			uint32_t timeLeft = TimingCounter[analogData->channelNb];
+//
+//			timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft / previousTotalTime[analogData->channelNb]);
+//			time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
+//			previousTotalTime[analogData->channelNb] = time;
+//
+//
+//
+//			if (time < 1)
+//				time = 1;
+//			TimingCounter[analogData->channelNb] = (uint32_t)time;
 
-			uint32_t timeLeft = TimingCounter[analogData->channelNb];
 
-			timingCyclePercentage[analogData->channelNb] = timingCyclePercentage[analogData->channelNb] + (timeLeft / previousTotalTime[analogData->channelNb]);
-			time = timeLeft * (1 - timingCyclePercentage[analogData->channelNb]);
-			previousTotalTime[analogData->channelNb] = time;
-
-			if (time < 1)
-				time = 1;
-			TimingCounter[analogData->channelNb] = (uint32_t) time;
 		}
 	}
 }
@@ -595,21 +610,34 @@ int main(void)
 	OS_Init(CPU_CORE_CLK_HZ, false);
 
 	error = OS_ThreadCreate(InitModulesThread,
-			NULL, &InitModulesThreadStack[THREAD_STACK_SIZE - 1], 0); // Highest priority
+													NULL,
+													&InitModulesThreadStack[THREAD_STACK_SIZE - 1],
+													0); // Highest priority
 
 	error = OS_ThreadCreate(PacketModuleThread,
-			NULL, &PacketModuleThreadStack[THREAD_STACK_SIZE - 1], 6);
-
-	error = OS_ThreadCreate(TimingModuleThread,
-			NULL, &TimingModuleThreadStack[THREAD_STACK_SIZE - 1], 4);
+														NULL,
+														&PacketModuleThreadStack[THREAD_STACK_SIZE - 1],
+														1);
 
 	error = OS_ThreadCreate(PITModuleThread,
-			NULL, &PITModuleThreadStack[THREAD_STACK_SIZE - 1], 5);
+														NULL,
+														&PITModuleThreadStack[THREAD_STACK_SIZE - 1],
+														2);
+
+	error = OS_ThreadCreate(TimingModuleThread,
+														NULL,
+														&TimingModuleThreadStack[THREAD_STACK_SIZE - 1],
+														3);
+
 
 	for (uint8_t threadNb = 0; threadNb < NB_ANALOG_CHANNELS; threadNb++)
 	{
-		error = OS_ThreadCreate(AnalogLoopbackThread, &AnalogThreadData[threadNb], &AnalogThreadStacks[threadNb][THREAD_STACK_SIZE - 1], ANALOG_THREAD_PRIORITIES[threadNb]);
+		error = OS_ThreadCreate(AnalogLoopbackThread,
+														&AnalogThreadData[threadNb],
+														&AnalogThreadStacks[threadNb][THREAD_STACK_SIZE - 1],
+														ANALOG_THREAD_PRIORITIES[threadNb]);
 	}
+
 
 	OS_Start();
 
