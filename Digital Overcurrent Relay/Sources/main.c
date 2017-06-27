@@ -429,7 +429,7 @@ static void InitModulesThread(void* pData)
 	///* If no valid Inverse mode is set then set to default INVERSE*/
 
 	PIT_Set(SAMPLING_CLOCK, 1250000, true);			// Set Pit with 1.25ms
-	//PIT_Set(TIMING_CLOCK, 1000000, true);
+	PIT_Set(TIMING_CLOCK, 1000000, true);
 
 	// Analog
 	(void) Analog_Init(CPU_BUS_CLK_HZ);
