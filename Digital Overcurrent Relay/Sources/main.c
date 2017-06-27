@@ -474,6 +474,8 @@ static void TimingModuleThread(void* pData)
 						Analog_Put(TRIP_CHANNEL, DOR_ACTIVE);
 						TripActive = true;
 						Flash_Write16((uint16_t *) NvTowerNb, (NvTimesTripped->l + 1));
+						for (uint8_t analogNb2 = 0; analogNb2 < NB_ANALOG_CHANNELS; analogNb2++)
+							TimingCounter[analogNb2] = 0;
 					}
 				}
 			}
@@ -552,7 +554,7 @@ void AnalogLoopbackThread(void* pData)
 			bool noTimingActive = true;
 
 			// For each analog thread, check if no timing is active is active
-			for (int i =0; i < NB_ANALOG_CHANNELS; i++)
+			for (uint8_t i = 0; i < NB_ANALOG_CHANNELS; i++)
 			{
 				noTimingActive &= !ChannelTimingActive[i];
 			}
@@ -561,10 +563,17 @@ void AnalogLoopbackThread(void* pData)
 			if (noTimingActive && TimingActive)
 			{
 				Analog_Put(TIMING_CHANNEL, DOR_IDLE);
-				Analog_Put(TRIP_CHANNEL, DOR_IDLE);
 				TimingActive = false;
-				analogData->timingCyclePercentage = 0;
+				Analog_Put(TRIP_CHANNEL, DOR_IDLE);
+				TripActive = false;
+				for (uint8_t i = 0; i < NB_ANALOG_CHANNELS; i++)
+				{
+					AnalogThreadData[i].timingCyclePercentage = 0;
+					AnalogThreadData[i].timeLeft = 0;
+					AnalogThreadData[i].previousTotalTime = 0;
+				}
 			}
+
 		} else
 		{
 			// Set channel timing to be true for specific channel number
@@ -583,6 +592,8 @@ void AnalogLoopbackThread(void* pData)
 				Analog_Put(TIMING_CHANNEL, DOR_ACTIVE);
 				TimingActive = true;
 			}
+
+
 
 			// TODO Fix Timing
 			// Calculate delay time
